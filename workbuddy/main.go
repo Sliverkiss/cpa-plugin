@@ -60,6 +60,7 @@ import "C"
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -70,6 +71,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -675,6 +677,120 @@ func rewriteModelInBody(body []byte, upstreamModel string) []byte {
 	return out
 }
 
+// ------------------------------------------------------------------------------
+// Usage reporting (request monitoring)
+// ------------------------------------------------------------------------------
+//
+// CPA's built-in executors (xai, codex, ...) publish usage records via
+// helps.UsageReporter; the plugin-executor path does not, so requests handled
+// by this plugin never reach the usage queue / statistics. The plugin shares
+// the host process, so usage.PublishRecord delivers to the same DefaultManager
+// the built-ins use. There is no ctx across the C ABI, so a background context
+// is used — usage sinks (redisqueue etc.) do not depend on request ctx.
+
+// publishUsage emits one usage record for an upstream attempt. requestedModel
+// is the client-facing model (possibly an alias), upstreamModel the resolved
+// real model. Token detail is best-effort; failures carry status/body.
+func publishUsage(requestedModel, upstreamModel, authID string, started time.Time, detail usage.Detail, failed bool, statusCode int, errBody string) {
+	model := strings.TrimSpace(upstreamModel)
+	if model == "" {
+		model = strings.TrimSpace(requestedModel)
+	}
+	record := usage.Record{
+		Provider:    providerName,
+		Model:       model,
+		Alias:       strings.TrimSpace(requestedModel),
+		AuthID:      strings.TrimSpace(authID),
+		RequestedAt: started,
+		Failed:      failed,
+		Detail:      normalizeUsageDetail(detail),
+	}
+	if !started.IsZero() {
+		record.Latency = time.Since(started)
+	}
+	if failed {
+		record.Fail = usage.Failure{StatusCode: statusCode, Body: truncate(errBody, 512)}
+	}
+	usage.PublishRecord(context.Background(), record)
+}
+
+func normalizeUsageDetail(d usage.Detail) usage.Detail {
+	if d.TotalTokens == 0 {
+		if total := d.InputTokens + d.OutputTokens + d.ReasoningTokens; total > 0 {
+			d.TotalTokens = total
+		}
+	}
+	return d
+}
+
+// usageDetailFromMap converts an OpenAI-style "usage" JSON object into a
+// usage.Detail, tolerating both snake_case naming and numeric jitter.
+func usageDetailFromMap(m map[string]any) usage.Detail {
+	if len(m) == 0 {
+		return usage.Detail{}
+	}
+	num := func(keys ...string) int64 {
+		for _, k := range keys {
+			if v, ok := m[k]; ok {
+				switch n := v.(type) {
+				case float64:
+					return int64(n)
+				case int64:
+					return n
+				case json.Number:
+					i, _ := n.Int64()
+					return i
+				}
+			}
+		}
+		return 0
+	}
+	d := usage.Detail{
+		InputTokens:     num("prompt_tokens", "input_tokens"),
+		OutputTokens:    num("completion_tokens", "output_tokens"),
+		TotalTokens:     num("total_tokens"),
+		CachedTokens:    num("cached_tokens"),
+		CacheReadTokens: num("cache_read_input_tokens"),
+	}
+	if ct, ok := m["completion_tokens_details"].(map[string]any); ok {
+		if v, ok2 := ct["reasoning_tokens"].(float64); ok2 {
+			d.ReasoningTokens = int64(v)
+		}
+	}
+	return d
+}
+
+// usageDetailFromCompletion extracts the usage block from an aggregated
+// non-streaming chat.completion payload.
+func usageDetailFromCompletion(payload []byte) usage.Detail {
+	var obj map[string]any
+	if json.Unmarshal(payload, &obj) != nil {
+		return usage.Detail{}
+	}
+	m, _ := obj["usage"].(map[string]any)
+	return usageDetailFromMap(m)
+}
+
+// sseUsageCollector scans upstream SSE chunks and keeps the last "usage"
+// object seen (CodeBuddy emits it on the terminal chunk).
+type sseUsageCollector struct {
+	last map[string]any
+}
+
+func (c *sseUsageCollector) feed(rawJSON string) {
+	var chunk map[string]any
+	if json.Unmarshal([]byte(rawJSON), &chunk) != nil {
+		return
+	}
+	if u, ok := chunk["usage"].(map[string]any); ok && len(u) > 0 {
+		c.last = u
+	}
+}
+
+func (c *sseUsageCollector) detail() usage.Detail {
+	return usageDetailFromMap(c.last)
+}
+
 func handleModelStatic(raw []byte) ([]byte, error) {
 	var req pluginapi.StaticModelRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -1110,6 +1226,11 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	// Resolve oauth-model-alias (e.g. "point/deepseek-v4-flash") back to the
 	// real upstream model ID; the upstream rejects unknown alias IDs.
 	upstreamModel := resolveUpstreamModel(req.Model, req.AuthAttributes)
+	started := time.Now()
+	authUID := ""
+	if sa.Account.UID != "" {
+		authUID = sa.Account.UID
+	}
 	// CodeBuddy rejects non-stream requests (code 11101), so always stream
 	// upstream and fold the chunks into a single chat.completion object.
 	body := rewriteModelInBody(rewriteSystemForUpstream(forceStreamBody(req.Payload, req.OriginalRequest)), upstreamModel)
@@ -1120,17 +1241,21 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	backendHeaders(httpReq, sa)
 	resp, err := sharedHTTPClient().Do(httpReq)
 	if err != nil {
+		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		return nil, fmt.Errorf("http_error: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		payload, _ := io.ReadAll(resp.Body)
+		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, resp.StatusCode, string(payload))
 		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(payload), 200))
 	}
 	completion, err := aggregateCompletion(resp.Body, req.Model)
 	if err != nil {
+		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		return nil, err
 	}
+	publishUsage(req.Model, upstreamModel, authUID, started, usageDetailFromCompletion(completion), false, 0, "")
 	return okEnvelope(pluginapi.ExecutorResponse{Payload: completion})
 }
 
@@ -1152,6 +1277,11 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	upstreamModel := resolveUpstreamModel(req.Model, req.AuthAttributes)
+	started := time.Now()
+	authUID := ""
+	if sa.Account.UID != "" {
+		authUID = sa.Account.UID
+	}
 	body := req.Payload
 	if len(body) == 0 {
 		body = req.OriginalRequest
@@ -1163,10 +1293,13 @@ func handleExecStream(raw []byte) ([]byte, error) {
 
 	// No async stream id → fall back to synchronous chunk collection.
 	if req.StreamID == "" {
-		chunks, errCollect := collectUpstreamStream(body, sa, sseFramed)
+		collector := &sseUsageCollector{}
+		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, sseFramed, collector)
 		if errCollect != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errCollect.Error())
 			return nil, errCollect
 		}
+		publishUsage(req.Model, upstreamModel, authUID, started, collector.detail(), false, 0, "")
 		return okEnvelope(streamResponse{Headers: headers, Chunks: chunks})
 	}
 
@@ -1179,7 +1312,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		return okEnvelope(streamResponse{Headers: headers})
 	}
 	backendHeaders(httpReq, sa)
-	go pumpUpstreamStream(httpReq, req.StreamID, sseFramed)
+	go pumpUpstreamStream(httpReq, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started)
 	return okEnvelope(streamResponse{Headers: headers})
 }
 
@@ -1195,9 +1328,10 @@ func streamHeaders() http.Header {
 // emits each cleaned chunk to the host stream. It closes the stream when done.
 // An emit failure (client disconnected → host closed the stream) aborts the
 // pump so we stop reading a dead upstream.
-func pumpUpstreamStream(httpReq *http.Request, streamID string, sseFramed bool) {
+func pumpUpstreamStream(httpReq *http.Request, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time) {
 	resp, err := sharedHTTPClient().Do(httpReq)
 	if err != nil {
+		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
 		streamClose(streamID)
 		return
@@ -1205,10 +1339,12 @@ func pumpUpstreamStream(httpReq *http.Request, streamID string, sseFramed bool) 
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		errPayload, _ := io.ReadAll(resp.Body)
+		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, resp.StatusCode, string(errPayload))
 		streamEmitError(streamID, fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncate(string(errPayload), 200)))
 		streamClose(streamID)
 		return
 	}
+	collector := &sseUsageCollector{}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -1216,6 +1352,7 @@ func pumpUpstreamStream(httpReq *http.Request, streamID string, sseFramed bool) 
 		if content == "" || content == "[DONE]" {
 			continue
 		}
+		collector.feed(content)
 		cleaned := cleanChunkJSON(content)
 		if cleaned == "" {
 			continue
@@ -1227,27 +1364,30 @@ func pumpUpstreamStream(httpReq *http.Request, streamID string, sseFramed bool) 
 			break
 		}
 	}
+	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
 	streamClose(streamID)
 }
 
 // collectUpstreamStream is the synchronous fallback (no async stream id): drain
-// the upstream, clean each chunk, return them as a slice.
-func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool) ([]pluginapi.ExecutorStreamChunk, error) {
+// the upstream, clean each chunk, return them as a slice. The collector, when
+// non-nil, observes raw upstream chunks for usage extraction. statusCode is the
+// upstream HTTP status (0 for transport-level failures).
+func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, int, error) {
 	httpReq, err := http.NewRequest(http.MethodPost, endpointChat, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	backendHeaders(httpReq, sa)
 	resp, err := sharedHTTPClient().Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("http_error: %w", err)
+		return nil, 0, fmt.Errorf("http_error: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		errPayload, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(errPayload), 200))
+		return nil, resp.StatusCode, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(errPayload), 200))
 	}
-	return aggregateSSE(resp.Body, sseFramed), nil
+	return aggregateSSEWithCollector(resp.Body, sseFramed, collector), resp.StatusCode, nil
 }
 
 // clientNeedsSSEFrame reports whether chunk payloads must carry their own
@@ -1273,6 +1413,10 @@ func clientNeedsSSEFrame(metadata map[string]any) bool {
 // the payload is the raw JSON object and the host chat-completions writer adds
 // the framing itself.
 func aggregateSSE(r io.Reader, sseFramed bool) []pluginapi.ExecutorStreamChunk {
+	return aggregateSSEWithCollector(r, sseFramed, nil)
+}
+
+func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageCollector) []pluginapi.ExecutorStreamChunk {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var chunks []pluginapi.ExecutorStreamChunk
@@ -1280,6 +1424,9 @@ func aggregateSSE(r io.Reader, sseFramed bool) []pluginapi.ExecutorStreamChunk {
 		content := stripDataPrefix(scanner.Text())
 		if content == "" || content == "[DONE]" {
 			continue
+		}
+		if collector != nil {
+			collector.feed(content)
 		}
 		cleaned := cleanChunkJSON(content)
 		if cleaned == "" {
