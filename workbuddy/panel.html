@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorkBuddy 面板</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--border:#262b36;--fg:#e6e8ec;--mut:#8b93a3;--acc:#4c8dff;--ok:#3ecf8e;--warn:#ffb454;--err:#ff6b6b;--surface:#1a1d24;--surface-muted:#14161d;--radius-md:12px;--radius-lg:16px}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:24px 16px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);font-size:13px;margin-bottom:20px}
+.bar{display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px}
+button.sec{background:#262b36;color:var(--fg)}button:disabled{opacity:.5;cursor:default}
+.toggle{display:flex;gap:8px;align-items:center;color:var(--mut);font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+.card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center}
+.uid{color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:12px}
+.badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:99px;background:rgba(62,207,142,.14);color:var(--ok);border:1px solid rgba(62,207,142,.25)}
+.badge.pro{background:rgba(255,180,84,.14);color:var(--warn);border:1px solid rgba(255,180,84,.25)}
+.row{display:flex;justify-content:space-between;padding:5px 0;border-top:1px dashed var(--border)}
+.row:first-of-type{border-top:0}.k{color:var(--mut)}.v{font-weight:600}
+.v.ok{color:var(--ok)}.v.warn{color:var(--warn)}.v.err{color:var(--err)}
+.pkgs{margin-top:10px;font-size:12px;color:var(--mut)}
+.pkgs .p{display:flex;justify-content:space-between;padding:4px 0;border-top:1px solid var(--border)}
+.pb{margin-top:10px}
+.pb-label{display:flex;justify-content:space-between;font-size:12px;color:var(--mut);margin-bottom:6px}
+.pb-track{height:8px;background:var(--surface-muted);border-radius:99px;overflow:hidden}
+.pb-bar{height:100%;background:var(--ok);border-radius:99px;transition:width .6s ease}
+.pb-meta{font-size:11px;color:var(--mut);margin-top:6px}
+.actions{margin-top:12px;display:flex;gap:8px}
+/* 右上角滑入通知栈（社区面板同款 glass card，参考 CPA 管理面板的 notification 样式） */
+.toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:10px;z-index:9999;max-width:360px}
+.toast{background:var(--surface);border:1px solid var(--border);border-left:4px solid var(--acc);border-radius:var(--radius-md);padding:14px 18px;font-size:13px;box-shadow:0 10px 28px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.03);transform:translateX(120%);opacity:0;transition:transform .3s cubic-bezier(.2,.9,.3,1.1),opacity .25s;cursor:pointer;word-break:break-all}
+.toast.show{transform:translateX(0);opacity:1}
+.toast.ok{border-left-color:var(--ok);background:rgba(62,207,142,.14)}
+.toast.warn{border-left-color:var(--warn);background:#2c2718}
+.toast.err{border-left-color:var(--err);background:#331818}
+button.done{background:rgba(62,207,142,.14);color:var(--ok);border:1px solid rgba(62,207,142,.25);cursor:default;opacity:1}
+button.done:disabled{opacity:1}
+.toast .t{font-weight:600;margin-bottom:3px}
+.toast .d{color:var(--mut);font-size:12px;line-height:1.45}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes sp{to{transform:rotate(360deg)}}
+button .spin{border-color:#fff;border-top-color:transparent}
+.loading{color:var(--mut);text-align:center;padding:40px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>WorkBuddy 账号面板</h1>
+  <div class="sub">积分余额 · 套餐 · 签到状态 · 自动签到（每日 09:00 / 21:00）</div>
+  <div id="authBox" class="card" style="display:none;margin-bottom:16px">
+    <div style="margin-bottom:8px;color:var(--mut)">需要管理密钥（management key）才能访问账号数据。从 CPA 主面板嵌入时会自动获取，无需输入。</div>
+    <div style="display:flex;gap:8px">
+      <input id="keyInput" type="password" placeholder="management key" style="flex:1;background:#0f1115;border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--fg)">
+      <button onclick="saveKey()">连接</button>
+    </div>
+  </div>
+  <div class="bar">
+    <button onclick="load(true)">刷新数据</button>
+    <button class="sec" onclick="checkinAll(this)">全部签到</button>
+    <label class="toggle"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到</label>
+    <span class="toggle" id="svtime"></span>
+  </div>
+  <div id="grid" class="grid"><div class="loading">加载中…</div></div>
+</div>
+<div class="toasts" id="toasts"></div>
+<script>
+const API = "/v0/management/plugins/workbuddy";
+
+/* ---------- management key acquisition (3 fallbacks, zero config) ----------
+   1) CPA main panel localStorage "cli-proxy-auth" (XOR+base64, same-origin
+      iframe embed) — same approach as cpa-plugin-key-policy.
+   2) ?key= URL param (cleaned from history after read, kept in sessionStorage).
+   3) Manual input (sessionStorage only, never persisted).
+*/
+const ENC_PREFIX = "enc::v1::";
+const SECRET_SALT = "cli-proxy-api-webui::secure-storage";
+const PANEL_STORE = "cli-proxy-auth";
+const SS_KEY = "workbuddy-mgmt-key";
+
+function _enc(t){return new TextEncoder().encode(t)}
+function _dec(b){return new TextDecoder().decode(b)}
+function _keyBytes(){try{return _enc(SECRET_SALT+"|"+window.location.host+"|"+navigator.userAgent)}catch(e){return _enc(SECRET_SALT)}}
+function _xor(d,k){const r=new Uint8Array(d.length);for(let i=0;i<d.length;i++)r[i]=d[i]^k[i%k.length];return r}
+function _b64e(b){let s="";for(let i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s)}
+function _b64d(s){const bin=atob(s);const b=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i);return b}
+function deobfuscate(p){if(!p||!p.startsWith(ENC_PREFIX))return p;try{return _dec(_xor(_b64d(p.slice(ENC_PREFIX.length)),_keyBytes()))}catch(e){return p}}
+function isEmbedded(){try{return window.self!==window.top}catch(e){return false}}
+
+function readPanelKey(){
+  if(!isEmbedded())return null;
+  let raw;try{raw=localStorage.getItem(PANEL_STORE)}catch(e){return null}
+  if(!raw)return null;
+  try{
+    const parsed=JSON.parse(deobfuscate(raw));
+    const st=(parsed&&parsed.state)||parsed||{};
+    return typeof st.managementKey==="string"&&st.managementKey?st.managementKey:null;
+  }catch(e){return null}
+}
+function readUrlKey(){
+  const m=new URLSearchParams(window.location.search).get("key");
+  if(m){history.replaceState(null,"",window.location.pathname)}
+  return m;
+}
+function getKey(){
+  return sessionStorage.getItem(SS_KEY)||readPanelKey()||readUrlKey();
+}
+function saveKey(){
+  const v=document.getElementById("keyInput").value.trim();
+  if(!v)return;
+  sessionStorage.setItem(SS_KEY,v);
+  document.getElementById("authBox").style.display="none";
+  load(false);
+}
+function showAuth(){document.getElementById("authBox").style.display="block";const i=document.getElementById("keyInput");i&&i.focus()}
+function authHeaders(k){return k?{"Authorization":"Bearer "+k}:{}}
+/* --------------------------------------------------------------------------- */
+
+function toast(title, kind="ok", detail=""){
+  const box=document.getElementById("toasts");
+  const el=document.createElement("div");
+  el.className="toast "+kind;
+  el.innerHTML='<div class="t"></div>'+(detail?'<div class="d"></div>':'');
+  el.querySelector(".t").textContent=title;
+  if(detail)el.querySelector(".d").textContent=detail;
+  box.appendChild(el);
+  requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.add("show")));
+  const kill=()=>{el.classList.remove("show");setTimeout(()=>el.remove(),300)};
+  el.onclick=kill;
+  setTimeout(kill, kind==="err"?6000:4000);
+  while(box.children.length>5)box.firstChild.remove();
+}
+function busy(btn, on){
+  if(!btn)return;
+  if(on){btn.dataset.orig=btn.innerHTML;btn.disabled=true;btn.innerHTML='<span class="spin"></span>处理中…'}
+  else{btn.disabled=false;if(btn.dataset.orig)btn.innerHTML=btn.dataset.orig}
+}
+function fmtRemain(c){if(!c)return "-";return c.total_remain+" / "+(c.total_remain+c.total_used)}
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function pkgRows(pkgs){if(!pkgs||!pkgs.length)return "";return pkgs.map(p=>`<div class="p"><span>${esc(p.name)}</span><span>${p.remain}（余）· ${p.used}（用）· 至 ${(p.cycle_end||"").slice(0,10)}</span></div>`).join("")}
+function progressHTML(c){
+  if(!c||!c.total_remain)return '<div class="pb"><div class="pb-label"><span>用量进度</span><span>-</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
+  const total=c.total_remain+c.total_used, used=c.total_used, pct=total>0?Math.round(used/total*100):0;
+  let color='var(--ok)'; if(pct>60)color='var(--warn)'; if(pct>85)color='var(--err)';
+  return `<div class="pb"><div class="pb-label"><span>用量进度</span><span>${pct}%</span></div><div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${color}"></div></div><div class="pb-meta">已用 ${used} / 总量 ${total}</div></div>`;
+}
+function card(a){
+  const plan=(a.plan||"unknown").toLowerCase();
+  const ci=a.checkin||{}, cr=a.credits;
+  const checked=ci.today_checked_in;
+  const btnClass=checked?"done":"sec";
+  const btnText=checked?"已签到":"签到";
+  const btnDisabled=checked?" disabled=\"disabled\"":"";
+  return `<div class="card">
+  <h2>${esc(a.nickname||a.label||a.name)} <span class="badge ${plan}">${esc(a.plan||"-")}</span></h2>
+  <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
+  ${progressHTML(cr)}
+  ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
+  <div class="actions"><button class="${btnClass}" onclick="checkin('${a.auth_index}',this)"${btnDisabled}>${btnText}</button></div>
+  </div>`;
+}
+async function api(path, opts={}){
+  const k=getKey();
+  const r=await fetch(API+path,{...opts,headers:{...(opts.headers||{}),...authHeaders(k)}});
+  if(r.status===401){sessionStorage.removeItem(SS_KEY);showAuth();throw new Error("management key 无效或缺失")}
+  return r.json();
+}
+async function load(force){
+  const g=document.getElementById("grid");
+  try{
+    if(force){try{await api("/refresh",{method:"POST"})}catch(e){}}
+    const d=await api("/accounts");
+    document.getElementById("autoToggle").checked=!!d.checkin_auto;
+    document.getElementById("svtime").textContent="服务器时间 "+(d.server_time||"");
+    if(d.error){g.innerHTML='<div class="loading">'+esc(d.error)+"</div>";return}
+    if(!d.accounts||!d.accounts.length){g.innerHTML='<div class="loading">暂无 WorkBuddy 账号</div>';return}
+    g.innerHTML=d.accounts.map(card).join("");
+  }catch(e){g.innerHTML='<div class="loading">'+esc(e.message)+"</div>"}
+}
+function checkinResultToast(res, who){
+  const name=res.nickname||who||"账号";
+  if(res.error){toast(name+"：签到失败","err",res.error);return}
+  if(res.success){toast(name+"：签到成功","ok","+"+(res.credit??res.daily_credit??"")+" 积分 · 连续 "+(res.streak_days??"?")+" 天");return}
+  toast(name+"：今日已签到","ok",res.message||"");
+}
+async function checkin(idx, btn){
+  busy(btn,true);
+  try{
+    const d=await api("/checkin",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
+    const res=(d.results||[])[0]||{};
+    checkinResultToast(res);
+    load(false);
+  }catch(e){toast("签到请求失败","err",e.message)}
+  busy(btn,false);
+}
+async function checkinAll(btn){
+  busy(btn,true);
+  try{
+    const d=await api("/checkin",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    const rs=d.results||[];
+    const ok=rs.filter(x=>x.success).length, already=rs.filter(x=>!x.success&&!x.error).length, fail=rs.filter(x=>x.error).length;
+    if(!rs.length)toast("没有可签到的账号","warn");
+    else if(fail)toast("批量签到："+ok+" 成功 / "+already+" 已签 / "+fail+" 失败","err",rs.filter(x=>x.error).map(x=>(x.nickname||"")+": "+x.error).join("；"));
+    else if(ok)toast("批量签到："+ok+" 成功"+(already?" / "+already+" 今日已签":""),"ok");
+    else toast("全部账号今日已签到","warn");
+    load(false);
+  }catch(e){toast("批量签到失败","err",e.message)}
+  busy(btn,false);
+}
+async function toggleAuto(on){
+  try{const d=await api("/checkin/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});toast("自动签到已"+(d.checkin_auto?"开启 ✅":"关闭 ⏸"),"ok")}catch(e){toast("设置失败","err",e.message)}
+}
+document.getElementById("keyInput").addEventListener("keydown",e=>{if(e.key==="Enter")saveKey()});
+if(!getKey())showAuth();
+load(false);
+</script>
+</body>
+</html>
