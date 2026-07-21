@@ -531,11 +531,154 @@ func applyModelPolicy(models []pluginapi.ModelInfo, host pluginapi.HostConfigSum
 	return models
 }
 
+// ------------------------------------------------------------------------------
+// OAuth model-alias reverse resolution
+// ------------------------------------------------------------------------------
+//
+// CPA applies oauth-model-alias to the models this plugin registers, so the
+// gateway may route a request whose model ID is an alias (e.g.
+// "point/deepseek-v4-flash") to this executor. The upstream only knows the
+// real model IDs, so the plugin must map the alias back before forwarding.
+//
+// ExecutorRequest carries no host config, so the alias table is cached from
+// the AuthModelRequest.Host summary every time the host asks for models
+// (model.static / model.for_auth are re-queried by CPA on config reload,
+// keeping this cache in sync with oauth-model-alias changes). Auth-level
+// attribute overrides ("model_alias"/"model-alias"/"oauth-model-alias")
+// are parsed per request and take precedence over the global table.
+
+var modelAliasCache struct {
+	sync.RWMutex
+	byAlias map[string]string
+}
+
+func cacheModelAliases(host pluginapi.HostConfigSummary) {
+	entries := host.OAuthModelAlias[providerName]
+	if len(entries) == 0 {
+		// Host may key the channel case-insensitively; fall back to a scan.
+		for channel, list := range host.OAuthModelAlias {
+			if strings.EqualFold(strings.TrimSpace(channel), providerName) {
+				entries = list
+				break
+			}
+		}
+	}
+	byAlias := make(map[string]string, len(entries))
+	for _, e := range entries {
+		name := strings.TrimSpace(e.Name)
+		alias := strings.TrimSpace(e.Alias)
+		if name == "" || alias == "" || strings.EqualFold(name, alias) {
+			continue
+		}
+		byAlias[strings.ToLower(alias)] = name
+	}
+	modelAliasCache.Lock()
+	modelAliasCache.byAlias = byAlias
+	modelAliasCache.Unlock()
+}
+
+// resolveUpstreamModel maps an aliased requested model back to the real
+// upstream model ID. Returns the input unchanged when nothing matches.
+func resolveUpstreamModel(model string, attributes map[string]string) string {
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return model
+	}
+	key := strings.ToLower(m)
+	if name, ok := parseModelAliasAttribute(attributes)[key]; ok {
+		return name
+	}
+	modelAliasCache.RLock()
+	name, ok := modelAliasCache.byAlias[key]
+	modelAliasCache.RUnlock()
+	if ok {
+		return name
+	}
+	return m
+}
+
+// parseModelAliasAttribute decodes a per-auth alias override from auth
+// attributes. Accepts JSON ([{"name":...,"alias":...}] or {alias:name}) or
+// comma-separated "alias=name" pairs.
+func parseModelAliasAttribute(attributes map[string]string) map[string]string {
+	if len(attributes) == 0 {
+		return nil
+	}
+	raw := ""
+	for _, k := range []string{"model_alias", "model-alias", "oauth-model-alias"} {
+		if v := strings.TrimSpace(attributes[k]); v != "" {
+			raw = v
+			break
+		}
+	}
+	if raw == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	add := func(name, alias string) {
+		name, alias = strings.TrimSpace(name), strings.TrimSpace(alias)
+		if name != "" && alias != "" && !strings.EqualFold(name, alias) {
+			out[strings.ToLower(alias)] = name
+		}
+	}
+	if strings.HasPrefix(raw, "[") {
+		var list []struct {
+			Name  string `json:"name"`
+			Alias string `json:"alias"`
+		}
+		if json.Unmarshal([]byte(raw), &list) == nil {
+			for _, e := range list {
+				add(e.Name, e.Alias)
+			}
+			return out
+		}
+	}
+	if strings.HasPrefix(raw, "{") {
+		var m map[string]string
+		if json.Unmarshal([]byte(raw), &m) == nil {
+			for alias, name := range m {
+				add(name, alias)
+			}
+			return out
+		}
+	}
+	for _, pair := range strings.Split(raw, ",") {
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) == 2 {
+			add(kv[1], kv[0])
+		}
+	}
+	return out
+}
+
+// rewriteModelInBody replaces the "model" field of a chat-completions body
+// with the resolved upstream model ID.
+func rewriteModelInBody(body []byte, upstreamModel string) []byte {
+	if len(body) == 0 || strings.TrimSpace(upstreamModel) == "" {
+		return body
+	}
+	var obj map[string]any
+	if json.Unmarshal(body, &obj) != nil {
+		return body
+	}
+	cur, _ := obj["model"].(string)
+	if strings.EqualFold(strings.TrimSpace(cur), strings.TrimSpace(upstreamModel)) {
+		return body
+	}
+	obj["model"] = upstreamModel
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func handleModelStatic(raw []byte) ([]byte, error) {
 	var req pluginapi.StaticModelRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
+	cacheModelAliases(req.Host)
 	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: applyModelPolicy(fetchDynamicModels(), req.Host)})
 }
 
@@ -544,11 +687,13 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
-	provider := req.AuthProvider
-	if strings.TrimSpace(provider) == "" {
-		provider = providerName
-	}
-	return okEnvelope(pluginapi.ModelResponse{Provider: provider, Models: applyModelPolicy(fetchDynamicModels(), req.Host)})
+	// Always return the plugin's canonical provider key. The host skips any
+	// response whose Provider doesn't match the auth's provider, so echoing
+	// req.AuthProvider back would silently drop the model list whenever the
+	// auth file carries a non-canonical provider string.
+	cacheModelAliases(req.Host)
+	models := applyModelPolicy(fetchDynamicModelsFromStorage(req.StorageJSON), req.Host)
+	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
 }
 
 func handleFrontendAuth(raw []byte) ([]byte, error) {
@@ -959,9 +1104,12 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Resolve oauth-model-alias (e.g. "point/deepseek-v4-flash") back to the
+	// real upstream model ID; the upstream rejects unknown alias IDs.
+	upstreamModel := resolveUpstreamModel(req.Model, req.AuthAttributes)
 	// CodeBuddy rejects non-stream requests (code 11101), so always stream
 	// upstream and fold the chunks into a single chat.completion object.
-	body := rewriteSystemForUpstream(forceStreamBody(req.Payload, req.OriginalRequest))
+	body := rewriteModelInBody(rewriteSystemForUpstream(forceStreamBody(req.Payload, req.OriginalRequest)), upstreamModel)
 	httpReq, err := http.NewRequest(http.MethodPost, endpointChat, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -1000,11 +1148,12 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	upstreamModel := resolveUpstreamModel(req.Model, req.AuthAttributes)
 	body := req.Payload
 	if len(body) == 0 {
 		body = req.OriginalRequest
 	}
-	body = rewriteSystemForUpstream(body)
+	body = rewriteModelInBody(rewriteSystemForUpstream(body), upstreamModel)
 
 	headers := streamHeaders()
 	sseFramed := clientNeedsSSEFrame(req.Metadata)
