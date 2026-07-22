@@ -1,3 +1,8 @@
+# build outputs (c-shared plugin binary + generated header)
 dist/
 *.so
 *.h
+
+# Go
+*.test
+*.out
