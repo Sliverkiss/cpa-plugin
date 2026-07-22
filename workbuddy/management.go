@@ -245,11 +245,64 @@ func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
 	return sum, nil
 }
 
+// resourcePackage is one row of get-user-resource Accounts[].
+// Upstream exposes two metric pairs per package:
+//
+//	CapacityRemain/Used/Size         — lifetime package totals (Used often ≈0
+//	                                   for monthly-refresh free packs)
+//	CycleCapacityRemain/Used/Size    — the active billing cycle; Used is
+//	                                   sometimes omitted entirely
+type resourcePackage struct {
+	PackageName         string `json:"PackageName"`
+	CapacityRemain      int64  `json:"CapacityRemain"`
+	CapacityUsed        int64  `json:"CapacityUsed"`
+	CapacitySize        int64  `json:"CapacitySize"`
+	CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
+	CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
+	CycleCapacitySize   int64  `json:"CycleCapacitySize"`
+	CycleStartTime      string `json:"CycleStartTime"`
+	CycleEndTime        string `json:"CycleEndTime"`
+}
+
+// packageRemainUsed picks current-cycle remain/used for one package.
+// Prefer cycle metrics whenever CycleCapacitySize is present; compute used as
+// size−remain so missing CycleCapacityUsed never under-reports consumption.
+// Fall back to lifetime Capacity* only when cycle fields are absent entirely.
+func packageRemainUsed(a resourcePackage) (remain, used int64) {
+	if a.CycleCapacitySize > 0 {
+		remain = a.CycleCapacityRemain
+		used = a.CycleCapacitySize - a.CycleCapacityRemain
+		if used < 0 {
+			used = 0
+		}
+		// Prefer explicit CycleCapacityUsed when it is larger (defensive).
+		if a.CycleCapacityUsed > used {
+			used = a.CycleCapacityUsed
+		}
+		return remain, used
+	}
+	if a.CycleCapacityRemain > 0 || a.CycleCapacityUsed > 0 {
+		remain = a.CycleCapacityRemain
+		used = a.CycleCapacityUsed
+		return remain, used
+	}
+	remain = a.CapacityRemain
+	used = a.CapacityUsed
+	if used == 0 && a.CapacitySize > remain && remain >= 0 {
+		used = a.CapacitySize - remain
+	}
+	return remain, used
+}
+
 func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
 	now := time.Now()
+	// Status 0=active, 3=exhausted-but-still-listed. PageSize 100 covers the
+	// multi-pack free accounts we see in production; paginate if TotalCount
+	// ever exceeds it.
+	const pageSize = 100
 	body := map[string]any{
 		"PageNumber":               1,
-		"PageSize":                 100,
+		"PageSize":                 pageSize,
 		"ProductCode":              "p_tcaca",
 		"Status":                   []int{0, 3},
 		"PackageEndTimeRangeBegin": now.Format("2006-01-02 15:04:05"),
@@ -262,31 +315,32 @@ func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
 	var resp struct {
 		Response struct {
 			Data struct {
-				Accounts []struct {
-					PackageName    string `json:"PackageName"`
-					CapacityRemain int64  `json:"CapacityRemain"`
-					CapacityUsed   int64  `json:"CapacityUsed"`
-					CycleStartTime string `json:"CycleStartTime"`
-					CycleEndTime   string `json:"CycleEndTime"`
-				} `json:"Accounts"`
+				TotalCount int64             `json:"TotalCount"`
+				Accounts   []resourcePackage `json:"Accounts"`
 			} `json:"Data"`
 		} `json:"Response"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
+	// Aggregate ALL packages (体验版 + 多个裂变包 + 其它赠送包) into one
+	// account-level remain/used total. Per-package rows are kept for the panel.
 	sum := &creditsSummary{}
 	for _, a := range resp.Response.Data.Accounts {
-		sum.TotalRemain += a.CapacityRemain
-		sum.TotalUsed += a.CapacityUsed
+		remain, used := packageRemainUsed(a)
+		sum.TotalRemain += remain
+		sum.TotalUsed += used
 		sum.Packages = append(sum.Packages, packageSummary{
 			Name:       a.PackageName,
-			Remain:     a.CapacityRemain,
-			Used:       a.CapacityUsed,
+			Remain:     remain,
+			Used:       used,
 			CycleStart: a.CycleStartTime,
 			CycleEnd:   a.CycleEndTime,
 		})
 	}
+	// Soft note: if TotalCount > returned rows, pagination would be needed.
+	// Current free accounts have 3–4 packs; pageSize=100 is ample.
+	_ = resp.Response.Data.TotalCount
 	return sum, nil
 }
 
