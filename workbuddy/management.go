@@ -704,6 +704,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/refresh", Description: "Force refresh quota/cache for all accounts."},
 			{Method: http.MethodPost, Path: base + "/checkin", Description: "Manually check in one account (auth_index) or all."},
 			{Method: http.MethodPost, Path: base + "/checkin/config", Description: "Toggle auto check-in (enabled: true/false)."},
+			{Method: http.MethodGet, Path: base + "/credits", Description: "Get real-time credits for one (auth_index query) or all accounts."},
 		},
 		Resources: []resourceRoute{
 			{Path: "/panel", Menu: "WorkBuddy", Description: "WorkBuddy dashboard: credits, check-in, plan."},
@@ -735,6 +736,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleManualCheckin(req)))
 	case req.Method == http.MethodPost && path == base+"/checkin/config":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCheckinConfig(req)))
+	case req.Method == http.MethodGet && path == base+"/credits":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCreditsQuery(req)))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
@@ -819,6 +822,46 @@ func handleCheckinConfig(req pluginapi.ManagementRequest) map[string]any {
 	cur := checkinAuto
 	checkinAutoMu.Unlock()
 	return map[string]any{"checkin_auto": cur, "persistent": false}
+}
+
+// handleCreditsQuery returns real-time credits for one or all accounts.
+// Pass ?auth_index=<idx> to query a single account; omit for all.
+func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
+	authIndex := ""
+	if vals := req.Query["auth_index"]; len(vals) > 0 {
+		authIndex = strings.TrimSpace(vals[0])
+	}
+	files, err := hostAuthList()
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	type acctCredits struct {
+		AuthIndex string           `json:"auth_index"`
+		Nickname  string           `json:"nickname"`
+		UID       string           `json:"uid"`
+		Credits   *creditsSummary  `json:"credits,omitempty"`
+		Error     string           `json:"error,omitempty"`
+	}
+	var out []acctCredits
+	for _, f := range files {
+		if authIndex != "" && f.AuthIndex != authIndex {
+			continue
+		}
+		sa, err := hostAuthGet(f.AuthIndex)
+		if err != nil {
+			out = append(out, acctCredits{AuthIndex: f.AuthIndex, Error: "load auth: " + err.Error()})
+			continue
+		}
+		cr, err := fetchUserResource(sa)
+		ac := acctCredits{AuthIndex: f.AuthIndex, Nickname: sa.Account.Nickname, UID: sa.Account.UID}
+		if err != nil {
+			ac.Error = err.Error()
+		} else {
+			ac.Credits = cr
+		}
+		out = append(out, ac)
+	}
+	return map[string]any{"accounts": out}
 }
 
 // -----------------------------------------------------------------------------
