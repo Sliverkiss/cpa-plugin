@@ -338,7 +338,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.3.9"
+var version = "0.3.10"
 
 func wbRegistration() registration {
 	return registration{
@@ -1097,6 +1097,12 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
 		return nil, resp.StatusCode, fmt.Errorf("http_error: upstream %d", resp.StatusCode)
+	}
+	if resp.StatusCode >= 300 {
+		// Redirects: Go's client follows them for GET, but a 3xx that lands
+		// here (e.g. POST 307/308 not re-sent, or a new upstream gateway) would
+		// otherwise surface as a misleading JSON "parse failed".
+		return nil, resp.StatusCode, fmt.Errorf("http_error: upstream redirect %d (location: %s)", resp.StatusCode, resp.Header.Get("Location"))
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
