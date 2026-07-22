@@ -408,6 +408,24 @@ func buildDashboard(force bool) map[string]any {
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
+	// Prune cache entries for accounts that no longer exist (auth deleted via
+	// CPA UI) or whose TTL expired long ago. Without this, accountCache grows
+	// monotonically for the lifetime of the process.
+	live := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		live[f.AuthIndex] = struct{}{}
+	}
+	accountCache.Range(func(key, value any) bool {
+		idx, _ := key.(string)
+		if _, ok := live[idx]; !ok {
+			accountCache.Delete(key)
+			return true
+		}
+		if e, ok := value.(*accountCacheEntry); ok && time.Since(e.fetched) > 4*accountCacheTTL {
+			accountCache.Delete(key)
+		}
+		return true
+	})
 	out := make([]wbAccount, 0, len(files))
 	for _, f := range files {
 		acct := wbAccount{

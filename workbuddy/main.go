@@ -329,7 +329,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.3.3"
+var version = "0.3.4"
 
 func wbRegistration() registration {
 	return registration{
@@ -471,15 +471,18 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 }
 
 // callModelsAPI GETs /console/enterprises/personal/models from the upstream.
+// Uses the shared client (connection pooling) with a per-request 15s budget;
+// the shared client's own 120s timeout stays as the outer bound.
 func callModelsAPI(accessToken string) ([]pluginapi.ModelInfo, error) {
-	req, err := http.NewRequest(http.MethodGet, endpointModels, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointModels, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := sharedHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
