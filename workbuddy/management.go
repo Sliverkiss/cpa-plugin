@@ -479,14 +479,10 @@ func ensureScheduler() {
 	go schedulerLoop(schedulerStop)
 }
 
-func stopCheckinScheduler() {
-	schedulerMu.Lock()
-	defer schedulerMu.Unlock()
-	if schedulerStop != nil {
-		close(schedulerStop)
-		schedulerStop = nil
-	}
-}
+// Note: there is deliberately no stopCheckinScheduler. The plugin shutdown
+// export is a no-op (see cliproxyPluginShutdown) because the host invokes it
+// during its own runtime teardown, where touching Go sync primitives from the
+// plugin's c-shared runtime caused SIGSEGV on every restart.
 
 func nextCheckinTime(now time.Time) time.Time {
 	var earliest time.Time

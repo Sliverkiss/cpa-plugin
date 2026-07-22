@@ -180,7 +180,16 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 }
 
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() { stopCheckinScheduler() }
+func cliproxyPluginShutdown() {
+	// Intentionally a no-op. The host calls this on its own exit path (after
+	// the host Go runtime has started tearing down) and dlclose()es this
+	// library immediately afterwards. Touching any Go runtime state here —
+	// mutexes, channel close, goroutine synchronization — risks a SIGSEGV in
+	// cgo (observed on every docker restart: SIGSEGV in
+	// _Cfunc_cliproxy_shutdown_plugin, PC near a freed runtime pointer).
+	// The scheduler goroutine and janitor ticker hold no resources that
+	// outlive the process; the OS reclaims them on exit.
+}
 
 // -----------------------------------------------------------------------------
 // Host calls (async streaming + auth callbacks)
@@ -329,7 +338,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.3.4"
+var version = "0.3.5"
 
 func wbRegistration() registration {
 	return registration{
