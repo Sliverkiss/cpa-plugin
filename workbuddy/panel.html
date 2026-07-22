@@ -140,7 +140,6 @@ function busy(btn, on){
 }
 function fmtRemain(c){if(!c)return "-";const t=(c.total_remain||0)+(c.total_used||0);return c.total_remain+" 余 / "+t+" 总"}
 function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
-function pkgRows(pkgs){if(!pkgs||!pkgs.length)return "";return '<div class="pkgs">'+pkgs.map(p=>`<div class="p"><span>${esc(p.name)}</span><span>${p.remain} 余 · ${p.used} 用 · 至 ${(p.cycle_end||"").slice(0,10)}</span></div>`).join("")+'</div>'}
 function progressHTML(c){
   // total=0 only when both remain and used are missing/zero (no packages).
   if(!c||(!(c.total_remain||0)&&!(c.total_used||0)))return '<div class="pb"><div class="pb-label"><span>用量进度</span><span>-</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
@@ -159,7 +158,6 @@ function card(a){
   <h2>${esc(a.nickname||a.label||a.name)} <span class="badge ${plan}">${esc(a.plan||"-")}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
   ${progressHTML(cr)}
-  ${pkgRows(cr&&cr.packages)}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
   <div class="actions"><button class="${btnClass}" onclick="checkin('${a.auth_index}',this)"${btnDisabled}>${btnText}</button></div>
   </div>`;
