@@ -334,7 +334,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.3.17"
+var version = "0.3.18"
 
 func wbRegistration() registration {
 	return registration{
@@ -346,8 +346,8 @@ func wbRegistration() registration {
 			GitHubRepository: "https://github.com/Sliverkiss/cpa-plugin",
 			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "checkin_auto", Type: "boolean", Description: "Enable daily auto check-in at 09:00 and 21:00 local time (default true)."},
-				{Name: "models", Type: "array", Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning."},
+				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 and 21:00 local time (default true)."},
+				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning."},
 			},
 		},
 		Capabilities: registrationCapability{
