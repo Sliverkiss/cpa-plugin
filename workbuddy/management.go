@@ -19,7 +19,16 @@ import (
 )
 
 // billingBase hosts the Buddy-gas-station check-in and resource-package APIs.
-const billingBase = "https://www.codebuddy.cn"
+// It is a var (not const) so tests can override it with an httptest server.
+var billingBase = "https://www.codebuddy.cn"
+
+// setBillingBase temporarily overrides billingBase for tests; returns a
+// restore func.
+func setBillingBase(s string) func() {
+	old := billingBase
+	billingBase = s
+	return func() { billingBase = old }
+}
 
 // check-in schedule: 09:00 and 21:00 local time.
 var checkinHours = []int{9, 21}
@@ -170,7 +179,35 @@ func billingHeaders(req *http.Request, sa *storedAuth) {
 	}
 }
 
+// billingRetryDelays backs off before retrying a billing call that failed
+// with a transient error (HTTP 5xx or transport error). codebuddy.cn
+// intermittently returns 500s; without a retry a single hiccup surfaces as a
+// panel error even though the very next request would succeed.
+var billingRetryDelays = []time.Duration{300 * time.Millisecond, 900 * time.Millisecond}
+
 func billingCall(sa *storedAuth, path string, body any) (json.RawMessage, error) {
+	data, err := billingCallOnce(sa, path, body)
+	for _, d := range billingRetryDelays {
+		if err == nil || !isTransientBillingErr(err) {
+			break
+		}
+		time.Sleep(d)
+		data, err = billingCallOnce(sa, path, body)
+	}
+	return data, err
+}
+
+// isTransientBillingErr reports whether err came from an upstream 5xx or a
+// transport failure (both retryable). 4xx and business-code errors are not.
+func isTransientBillingErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.HasPrefix(msg, "http 5") || strings.HasPrefix(msg, "http=5") || strings.Contains(msg, "status 5")
+}
+
+func billingCallOnce(sa *storedAuth, path string, body any) (json.RawMessage, error) {
 	var reader *bytes.Reader
 	if body != nil {
 		raw, _ := json.Marshal(body)
@@ -189,6 +226,15 @@ func billingCall(sa *storedAuth, path string, body any) (json.RawMessage, error)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	// Upstream 5xx is transient — classify it so billingCall can retry,
+	// and keep the response body snippet for diagnosis.
+	if resp.StatusCode >= 500 {
+		snippet := strings.TrimSpace(string(raw))
+		if len(snippet) > 120 {
+			snippet = snippet[:120]
+		}
+		return nil, fmt.Errorf("http %d from %s: %s", resp.StatusCode, path, snippet)
+	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("parse failed: %w", err)
@@ -421,6 +467,8 @@ func jsonStr(m map[string]any, keys ...string) string {
 // -----------------------------------------------------------------------------
 
 // accountCache caches per-account checkin/credits/plan results for 5 minutes.
+// Entry doubles as last-known-good snapshot: when a refresh partially fails,
+// the failed field falls back to the previous value instead of being wiped.
 type accountCacheEntry struct {
 	checkin *checkinSummary
 	credits *creditsSummary
@@ -433,25 +481,49 @@ var (
 	accountCacheTTL = 5 * time.Minute
 )
 
+// cachedAccountDetails fetches plan/checkin/credits concurrently (upstream
+// round-trip dominates; 3 serial calls ≈ 3× latency). On any individual
+// failure the previous cached value is kept (stale-while-error) so a
+// transient upstream 500 does not blank the panel row.
 func cachedAccountDetails(authIndex string, sa *storedAuth, force bool) (plan string, ci *checkinSummary, cr *creditsSummary, errs []string) {
-	if !force {
-		if v, ok := accountCache.Load(authIndex); ok {
-			e := v.(*accountCacheEntry)
-			if time.Since(e.fetched) < accountCacheTTL {
-				return e.plan, e.checkin, e.credits, nil
-			}
+	var prev *accountCacheEntry
+	if v, ok := accountCache.Load(authIndex); ok {
+		prev = v.(*accountCacheEntry)
+		if !force && time.Since(prev.fetched) < accountCacheTTL {
+			return prev.plan, prev.checkin, prev.credits, nil
 		}
 	}
-	plan = fetchPaymentType(sa)
-	if c, err := fetchCheckinStatus(sa); err == nil {
-		ci = c
-	} else {
-		errs = append(errs, "checkin: "+err.Error())
-	}
-	if r, err := fetchUserResource(sa); err == nil {
-		cr = r
-	} else {
-		errs = append(errs, "credits: "+err.Error())
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); plan = fetchPaymentType(sa) }()
+	go func() {
+		defer wg.Done()
+		if c, err := fetchCheckinStatus(sa); err == nil {
+			ci = c
+		} else {
+			errs = append(errs, "checkin: "+err.Error())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if r, err := fetchUserResource(sa); err == nil {
+			cr = r
+		} else {
+			errs = append(errs, "credits: "+err.Error())
+		}
+	}()
+	wg.Wait()
+	// Stale-while-error: carry over previous values for fields that failed.
+	if prev != nil {
+		if ci == nil {
+			ci = prev.checkin
+		}
+		if cr == nil {
+			cr = prev.credits
+		}
+		if plan == "" {
+			plan = prev.plan
+		}
 	}
 	accountCache.Store(authIndex, &accountCacheEntry{checkin: ci, credits: cr, plan: plan, fetched: time.Now()})
 	return
@@ -480,29 +552,38 @@ func buildDashboard(force bool) map[string]any {
 		}
 		return true
 	})
-	out := make([]wbAccount, 0, len(files))
-	for _, f := range files {
-		acct := wbAccount{
-			AuthIndex: f.AuthIndex,
-			Name:      f.Name,
-			Label:     f.Label,
-			Status:    f.Status,
-		}
-		sa, err := hostAuthGet(f.AuthIndex)
-		if err != nil {
-			acct.Error = "load auth: " + err.Error()
-			out = append(out, acct)
-			continue
-		}
-		acct.Nickname = sa.Account.Nickname
-		acct.UID = sa.Account.UID
-		plan, ci, cr, errs := cachedAccountDetails(f.AuthIndex, sa, force)
-		acct.Plan = plan
-		acct.Checkin = ci
-		acct.Credits = cr
-		acct.Error = strings.Join(errs, "; ")
-		out = append(out, acct)
+	out := make([]wbAccount, len(files))
+	// Accounts are independent — fetch their dashboards concurrently. With 4
+	// accounts this cuts cold-load latency from ~4×(3 serial upstream calls)
+	// to roughly one slowest account.
+	var wg sync.WaitGroup
+	for i, f := range files {
+		wg.Add(1)
+		go func(i int, f pluginapi.HostAuthFileEntry) {
+			defer wg.Done()
+			acct := wbAccount{
+				AuthIndex: f.AuthIndex,
+				Name:      f.Name,
+				Label:     f.Label,
+				Status:    f.Status,
+			}
+			sa, err := hostAuthGet(f.AuthIndex)
+			if err != nil {
+				acct.Error = "load auth: " + err.Error()
+				out[i] = acct
+				return
+			}
+			acct.Nickname = sa.Account.Nickname
+			acct.UID = sa.Account.UID
+			plan, ci, cr, errs := cachedAccountDetails(f.AuthIndex, sa, force)
+			acct.Plan = plan
+			acct.Checkin = ci
+			acct.Credits = cr
+			acct.Error = strings.Join(errs, "; ")
+			out[i] = acct
+		}(i, f)
 	}
+	wg.Wait()
 	checkinAutoMu.RLock()
 	auto := checkinAuto
 	checkinAutoMu.RUnlock()

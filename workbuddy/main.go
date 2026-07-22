@@ -338,7 +338,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.3.12"
+var version = "0.3.13"
 
 func wbRegistration() registration {
 	return registration{
@@ -1152,7 +1152,14 @@ func toAuthData(sa *storedAuth) pluginapi.AuthData {
 		FileName:    fileName,
 		Label:       label,
 		StorageJSON: storage,
-		Metadata:    map[string]any{"type": providerName},
+		// Standardized auth metadata. `type` is required by the host for
+		// auth-file classification; `logo` lets the management UI show the
+		// provider icon on auth rows (frontend reads e.logo || e.metadata.logo).
+		Metadata: map[string]any{
+			"type":     providerName,
+			"provider": providerName,
+			"logo":     pluginLogoURL,
+		},
 	}
 }
 
