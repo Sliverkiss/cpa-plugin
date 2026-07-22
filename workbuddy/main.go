@@ -338,7 +338,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.3.8"
+var version = "0.3.9"
 
 func wbRegistration() registration {
 	return registration{
@@ -1297,30 +1297,11 @@ func handleRefreshAuth(raw []byte) ([]byte, error) {
 		time.Now().Add(time.Duration(tok.ExpiresIn)*time.Second).Unix(),
 		sa.Auth.ExpiresAt,
 	)
-	persistRefreshedAuth(sa)
+	// No explicit host.auth.save here: the host's auth Manager persists the
+	// refreshed credential itself after Refresh returns (conductor.go
+	// refreshAuth → m.Update → persist). Writing from the plugin too would
+	// double-write the file.
 	return okEnvelope(pluginapi.AuthRefreshResponse{Auth: toAuthData(sa)})
-}
-
-// persistRefreshedAuth writes the refreshed credential back to its auth file
-// via host.auth.save. Without this, the rotated tokens live only in the
-// host's runtime: after an unclean CPA restart the on-disk (old) refresh
-// token may already be invalidated by the rotation, bricking the account
-// until a manual re-login. Best-effort: a save failure must not fail the
-// refresh itself (the host already holds the new tokens in memory).
-func persistRefreshedAuth(sa *storedAuth) {
-	storage, err := json.Marshal(sa)
-	if err != nil {
-		return
-	}
-	name := authFileName
-	if uid := strings.TrimSpace(sa.Account.UID); uid != "" {
-		name = "workbuddy-" + uid + ".json"
-	}
-	body, err := json.Marshal(map[string]any{"name": name, "json": json.RawMessage(storage)})
-	if err != nil {
-		return
-	}
-	_, _ = hostCall(pluginabi.MethodHostAuthSave, body)
 }
 
 // -----------------------------------------------------------------------------
