@@ -44,6 +44,9 @@ func configure(raw []byte) {
 	checkinAutoMu.Lock()
 	defer checkinAutoMu.Unlock()
 	checkinAuto = true
+	schedulerModeMu.Lock()
+	defer schedulerModeMu.Unlock()
+	schedulerMode = schedulerModeOff // reset to default on reconfigure
 	if len(raw) > 0 {
 		var req struct {
 			ConfigYAML []byte `json:"config_yaml"`
@@ -54,6 +57,16 @@ func configure(raw []byte) {
 				if strings.HasPrefix(line, "checkin_auto:") {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "checkin_auto:"))
 					checkinAuto = v == "true" || v == "1" || v == "yes" || v == "on"
+				}
+				if strings.HasPrefix(line, "scheduler_mode:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "scheduler_mode:"))
+					// Strip surrounding quotes if present.
+					v = strings.Trim(v, "\"'")
+					if v == schedulerModeCredits {
+						schedulerMode = schedulerModeCredits
+					} else {
+						schedulerMode = schedulerModeOff
+					}
 				}
 			}
 		}
