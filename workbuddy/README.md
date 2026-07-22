@@ -1,31 +1,31 @@
-# WorkBuddy 插件
+# WorkBuddy Plugin / WorkBuddy 插件
 
-[WorkBuddy / CodeBuddy]（Tencent CodeBuddy `copilot.tencent.com`）CPA 插件。
+[English](#english) | [中文](#中文)
 
-## 功能特性
+Tencent **CodeBuddy** (`copilot.tencent.com`) provider plugin for [CLIProxyAPI (CPA)](https://github.com/router-for-me/CLIProxyAPI).
 
-- **OAuth 登录**：通过 CodeBuddy 网页授权流程获取 access token，多账号按 `workbuddy-<uid>.json` 独立保存
-- **动态模型拉取**：登录后自动从 `copilot.tencent.com/console/enterprises/personal/models` 拉取可用模型列表（5 分钟缓存 + 硬编码 fallback）
-- **Executor 转发**：流式 + 非流式 chat completions
-  - 后端始终返回 SSE，非流式请求自动聚合为单个 `chat.completion` JSON
-  - `cleanChunk` 清洗空 `function_call` / `tool_calls`，防客户端 truncated
-  - 跨协议入口（claude/gemini/codex）自动补 SSE `data:` framing
-  - alias 反解：`ExecutorRequest.Model` 可能是别名，用 `model.static`/`model.for_auth` 缓存的 Host 别名表反解后发上游
-  - `tool_choice` 归一化：OpenAI object 类型 → CodeBuddy 上游 string 类型（v0.3.15+）
-- **Usage 上报**：插件 executor 路径直接 `usage.PublishRecord`（宿主不对插件 executor 自动记用量），覆盖成功/上游 4xx/网络错误三条出口
-- **每日自动签到**：09:00 / 21:00 本地时区自动签到，可在面板开关（运行时开关，不持久化到 config.yaml）
-- **积分与套餐面板**：查看账号昵称、积分余额、套餐余量、用量进度、签到状态；并发拉取 + billing 5xx 重试 + stale-while-error 缓存
-- **OAuth 模型别名 / 禁用**：由 CPA 原生 `oauth-model-alias` / `oauth-excluded-models` 管理，插件只返回完整上游列表
+---
 
-## 安装方法
+## 中文
 
-1. 将 `workbuddy.so` 复制到 CPA 插件目录：
+### 功能
+
+- **OAuth 登录**：多账号 `workbuddy-<uid>.json`
+- **动态模型**：上游 models API + 5min 缓存 + 硬编码 fallback
+- **Executor**：流/非流 SSE 聚合、cleanChunk、跨协议 framing、alias 反解、tool_choice 归一
+- **Usage 上报**：`usage.PublishRecord` 三出口
+- **签到**：09:00 / 21:00 + 面板手动；多标签 per-account 锁
+- **积分面板**：耗尽角标、进度条、导入凭证 JSON
+- **Scheduler**（可选）：`scheduler_mode: off|credits`（**默认 off**）
+- **OAuth 别名/排除**：由 CPA 宿主 `oauth-model-alias` / `oauth-excluded-models` 处理
+
+### 安装
 
 ```bash
-cp workbuddy.so /path/to/cliproxyapi/plugins/workbuddy.so
+# 产物命名（GitHub Release / 手工）
+# workbuddy_linux_arm64.so  /  workbuddy_linux_amd64.so
+cp workbuddy_linux_arm64.so /path/to/cliproxyapi/plugins/workbuddy.so
 ```
-
-2. 在 CPA `config.yaml` 中启用：
 
 ```yaml
 plugins:
@@ -34,110 +34,93 @@ plugins:
   configs:
     workbuddy:
       enabled: true
+      # checkin_auto: true
+      # scheduler_mode: off   # or credits
 ```
 
-3. 重启 CPA 服务。
+重启 CPA。仅替换 `plugins/workbuddy.so`，**不要改 CPA / CPAMP 源码**。
 
-## 构建
+### CPAMP / Plugins Store
 
-需要 Go 1.26.0+ 和 CGO：
+- 仓库：`https://github.com/Sliverkiss/cpa-plugin`（`GitHubRepository` 元数据）
+- 安装：CPAMP 插件商店选 Release，或拷贝上表 so 到 `plugins.dir`
+- 资产约定：`workbuddy_<os>_<arch>.so`（见 `.github/workflows/release.yml`）
+- 侧栏：资源页 `/v0/resource/plugins/workbuddy/panel`
+- OAuth：管理端登录页使用插件 Logo
+
+### 构建与测试
 
 ```bash
 cd workbuddy
-make build VERSION=0.3.18
-# 产物：dist/workbuddy.so
+make test && make vet && make build VERSION=$(cat VERSION)
+# dist/workbuddy.so
 ```
 
-### 测试
+### 管理 API
 
-```bash
-make test    # go test ./...
-make vet     # go vet ./...
-make check   # test + vet
-```
-
-## 配置说明
-
-### 自动签到
-
-插件默认启用自动签到。可通过管理面板开关，或调用管理 API：
-
-```bash
-curl -X POST -H "Authorization: Bearer $CPA_MGMT_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"enabled":true}' \
-  http://127.0.0.1:12888/v0/management/plugins/workbuddy/checkin/config
-```
-
-> **限制**：`checkin_auto` 是运行时开关，CPA 重启后恢复 config 默认值。宿主无 plugin-config 写回调。
-
-### OAuth 模型别名 / 禁用
-
-在 CPA `config.yaml` 中配置（由宿主原生处理）：
-
-```yaml
-oauth-excluded-models:
-  workbuddy:
-    - hy3
-
-oauth-model-alias:
-  workbuddy:
-    - name: deepseek-v4-pro
-      alias: workbuddy-dsv4-pro
-      fork: true
-```
-
-## 管理面板
-
-```
-http://<cpa-host>/v0/resource/plugins/workbuddy/panel
-```
-
-- 查看所有 WorkBuddy 账号的积分、套餐、用量进度
-- 手动签到 / 全部签到
-- 开启/关闭自动签到
-- 刷新缓存
-
-面板鉴权（三通道，无硬编码 key）：
-1. 从 CPA 主面板 iframe 嵌入时自动读 `localStorage["cli-proxy-auth"]`
-2. URL `?key=` 参数（读后 `replaceState` 清除）
-3. 手动输入（存 `sessionStorage`）
-
-## 管理 API
-
-| 接口 | 方法 | 说明 |
+| 路径 | 方法 | 说明 |
 |---|---|---|
-| `/v0/management/plugins/workbuddy/accounts` | GET | 列出账号、积分、签到状态 |
-| `/v0/management/plugins/workbuddy/refresh` | POST | 强制刷新积分缓存 |
-| `/v0/management/plugins/workbuddy/checkin` | POST | 手动签到（单账号 `auth_index` 或全部） |
-| `/v0/management/plugins/workbuddy/checkin/config` | POST | 设置自动签到开关 |
-| `/v0/management/plugins/workbuddy/credits` | GET | 实时查询积分（单账号 `auth_index` 或全部） |
+| `.../accounts` | GET | 账号 + credits + **exhausted** |
+| `.../refresh` | POST | 强制刷新缓存 |
+| `.../checkin` | POST | 手动签到 |
+| `.../checkin/config` | POST | 自动签到开关 |
+| `.../credits` | GET | 实时积分 |
+| `.../import` | POST | 导入凭证 `{"json":{...}}` 或 `{"raw":"..."}` |
 
-## 能力声明
+面板：`/v0/resource/plugins/workbuddy/panel`
 
-| 能力 | 状态 |
-|---|---|
-| AuthProvider | ✅ OAuth login/poll/refresh/parse |
-| ModelProvider | ✅ 动态模型 + 静态 fallback |
-| Executor | ✅ 流式 + 非流式 + tool_choice 归一 |
-| ManagementAPI | ✅ 面板 + 管理 API |
-| FrontendAuthProvider | ❌ 不声明（依赖标准 OAuth 流程） |
+### 已知策略
 
-## 文件说明
+- **hy3\*** 系列：executor 将 `reasoning_effort` 钉为 `high`（非 ThinkingApplier 能力；见源码 `forceMaxThinking`）
+- **count_tokens**：上游无 API，返回 `{"input_tokens":0}`
+- **checkin_auto / scheduler_mode**：config_yaml 可配；面板 checkin 开关运行时不写回 yaml
+- **host.http.do**：评估结论见 `docs/host-http-evaluation.md`（暂不迁移）
+- **包结构**：同包多文件，不拆 internal（`docs/package-layout.md`）
+
+### 文件
 
 | 文件 | 说明 |
 |---|---|
-| `main.go` | 插件主入口：OAuth/模型/executor/usage |
-| `management.go` | 管理 API、签到调度、面板后端 |
-| `panel.html` | 管理面板前端 |
-| `*_test.go` | 单测：cleanchunk / expiry / credits / billing_retry / toolchoice |
-| `Makefile` | 构建/测试/检查 |
-| `go.mod` / `go.sum` | Go 模块依赖 |
+| `main.go` | ABI / OAuth / executor |
+| `management.go` | 面板 / 签到 / 导入 |
+| `scheduler.go` | scheduler.pick |
+| `panel.html` | 前端 |
+| `LICENSE` / `VERSION` / `CHANGELOG.md` | 发布元数据 |
+| `.github/workflows/release.yml` | 多架构 Release |
 
-## 注意事项
+---
 
-- 插件需要 CPA 管理密钥才能访问管理 API；从 CPA 主面板嵌入时自动读取
-- 多个 WorkBuddy 账号登录时按 `workbuddy-<uid>.json` 命名保存
-- 模型列表通过上游 API 动态获取，需要账号已登录且 token 有效
-- `checkin_auto` 开关不持久化到 config.yaml（宿主限制）
-- 插件不自行处理 `oauth-model-alias` / `oauth-excluded-models`（宿主原生处理）
+## English
+
+### Features
+
+OAuth multi-account provider, dynamic models, production executor (SSE, tools, aliases), usage reporting, daily check-in, credits dashboard with **exhausted** badge, optional **credits scheduler** (`scheduler_mode`, default `off`), credential JSON import.
+
+### Install
+
+Copy the platform `.so` to CPA `plugins/` as `workbuddy.so`, enable under `plugins.configs.workbuddy`, restart. Do **not** patch CPA or CPA-Manager-Plus sources.
+
+### Build
+
+```bash
+make test && make vet && make build VERSION=$(cat VERSION)
+```
+
+Release artifacts: `workbuddy_linux_arm64.so`, `workbuddy_linux_amd64.so` via GitHub Actions on tags `v*`.
+
+### Config
+
+```yaml
+plugins:
+  configs:
+    workbuddy:
+      enabled: true
+      scheduler_mode: off   # or credits
+      checkin_auto: true
+```
+
+### Notes
+
+- hy3\* models force `reasoning_effort=high` in-plugin
+- `count_tokens` stub returns zero input tokens
+- See `docs/host-http-evaluation.md` and `docs/package-layout.md`

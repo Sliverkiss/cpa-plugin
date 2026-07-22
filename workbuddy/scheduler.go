@@ -77,16 +77,23 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	}
 
 	// credits mode: pick the candidate with the highest cached TotalRemain.
+	// Exhausted accounts (remain=0 with known packages/used) sink to the bottom
+	// but are still selectable if every account is exhausted.
 	if mode == schedulerModeCredits {
 		type scored struct {
 			candidate pluginapi.SchedulerAuthCandidate
 			remain    int64
+			exhausted bool
 		}
 		items := make([]scored, 0, len(wbCandidates))
 		for _, c := range wbCandidates {
-			items = append(items, scored{candidate: c, remain: cachedCreditsRemain(c.ID)})
+			remain, exhausted := cachedCreditsScore(c.ID)
+			items = append(items, scored{candidate: c, remain: remain, exhausted: exhausted})
 		}
 		sort.SliceStable(items, func(i, j int) bool {
+			if items[i].exhausted != items[j].exhausted {
+				return !items[i].exhausted // non-exhausted first
+			}
 			return items[i].remain > items[j].remain
 		})
 		return okEnvelope(pluginapi.SchedulerPickResponse{
@@ -103,13 +110,20 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 // or -1 if no cache entry exists. This is non-blocking: stale cache is fine
 // for scheduler purposes — better to use last-known data than block the pick.
 func cachedCreditsRemain(authID string) int64 {
+	remain, _ := cachedCreditsScore(authID)
+	return remain
+}
+
+// cachedCreditsScore returns (remain, exhausted) from accountCache.
+// remain is -1 when unknown; exhausted uses isCreditsExhausted.
+func cachedCreditsScore(authID string) (int64, bool) {
 	v, ok := accountCache.Load(authID)
 	if !ok {
-		return -1
+		return -1, false
 	}
 	entry, ok := v.(*accountCacheEntry)
 	if !ok || entry.credits == nil {
-		return -1
+		return -1, false
 	}
-	return entry.credits.TotalRemain
+	return entry.credits.TotalRemain, isCreditsExhausted(entry.credits)
 }

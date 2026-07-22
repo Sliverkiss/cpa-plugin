@@ -80,22 +80,41 @@ func configure(raw []byte) {
 
 // wbAccount is one row of the dashboard.
 type wbAccount struct {
-	AuthIndex string          `json:"auth_index"`
-	Name      string          `json:"name"`
-	Label     string          `json:"label"`
-	Nickname  string          `json:"nickname"`
-	UID       string          `json:"uid"`
-	Plan      string          `json:"plan"`
-	Status    string          `json:"status"`
-	Credits   *creditsSummary `json:"credits,omitempty"`
-	Checkin   *checkinSummary `json:"checkin,omitempty"`
-	Error     string          `json:"error,omitempty"`
+	AuthIndex  string          `json:"auth_index"`
+	Name       string          `json:"name"`
+	Label      string          `json:"label"`
+	Nickname   string          `json:"nickname"`
+	UID        string          `json:"uid"`
+	Plan       string          `json:"plan"`
+	Status     string          `json:"status"`
+	Exhausted  bool            `json:"exhausted"`
+	Credits    *creditsSummary `json:"credits,omitempty"`
+	Checkin    *checkinSummary `json:"checkin,omitempty"`
+	Error      string          `json:"error,omitempty"`
 }
 
 type creditsSummary struct {
 	TotalRemain int64            `json:"total_remain"`
 	TotalUsed   int64            `json:"total_used"`
 	Packages    []packageSummary `json:"packages"`
+}
+
+// isCreditsExhausted is the shared "耗尽" definition for panel + scheduler.
+// Exhausted = we have usage signal and no remaining credits.
+// Missing credits data is NOT exhausted (unknown).
+func isCreditsExhausted(cr *creditsSummary) bool {
+	if cr == nil {
+		return false
+	}
+	if cr.TotalRemain > 0 {
+		return false
+	}
+	// remain==0: exhausted only when we know there was/is a package total
+	// (used>0, or packages present). Pure zero with no packages = no data.
+	if cr.TotalUsed > 0 {
+		return true
+	}
+	return len(cr.Packages) > 0
 }
 
 type packageSummary struct {
@@ -592,6 +611,7 @@ func buildDashboard(force bool) map[string]any {
 			acct.Plan = plan
 			acct.Checkin = ci
 			acct.Credits = cr
+			acct.Exhausted = isCreditsExhausted(cr)
 			acct.Error = strings.Join(errs, "; ")
 			out[i] = acct
 		}(i, f)
@@ -718,9 +738,10 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/checkin", Description: "Manually check in one account (auth_index) or all."},
 			{Method: http.MethodPost, Path: base + "/checkin/config", Description: "Toggle auto check-in (enabled: true/false)."},
 			{Method: http.MethodGet, Path: base + "/credits", Description: "Get real-time credits for one (auth_index query) or all accounts."},
+			{Method: http.MethodPost, Path: base + "/import", Description: "Import WorkBuddy credential JSON (nested or flat) into host auth store."},
 		},
 		Resources: []resourceRoute{
-			{Path: "/panel", Menu: "WorkBuddy", Description: "WorkBuddy dashboard: credits, check-in, plan."},
+			{Path: "/panel", Menu: "WorkBuddy", Description: "WorkBuddy dashboard: credits, check-in, plan, import."},
 		},
 	}
 }
@@ -751,6 +772,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCheckinConfig(req)))
 	case req.Method == http.MethodGet && path == base+"/credits":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCreditsQuery(req)))
+	case req.Method == http.MethodPost && path == base+"/import":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleImportAuth(req)))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
@@ -790,8 +813,13 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 	}
 	results := make([]map[string]any, 0, len(targets))
 	for _, f := range targets {
+		// Per-account lock: multi-tab concurrent check-in on the same account
+		// serializes; upstream is mostly idempotent but this avoids stampede.
+		mu := checkinLockFor(f.AuthIndex)
+		mu.Lock()
 		sa, err := hostAuthGet(f.AuthIndex)
 		if err != nil {
+			mu.Unlock()
 			results = append(results, map[string]any{"auth_index": f.AuthIndex, "error": err.Error()})
 			continue
 		}
@@ -802,6 +830,7 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 				"success": false, "message": "already checked in today",
 			})
 			accountCache.Delete(f.AuthIndex)
+			mu.Unlock()
 			continue
 		}
 		res, err := performCheckinCall(sa)
@@ -815,8 +844,72 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 		}
 		results = append(results, out)
 		accountCache.Delete(f.AuthIndex)
+		mu.Unlock()
 	}
 	return map[string]any{"results": results}
+}
+
+// checkinLocks serializes per-account manual check-in (B4).
+var (
+	checkinLocks   sync.Map // auth_index -> *sync.Mutex
+)
+
+func checkinLockFor(authIndex string) *sync.Mutex {
+	v, _ := checkinLocks.LoadOrStore(authIndex, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// handleImportAuth accepts nested or flat credential JSON and persists via host.auth.save.
+func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
+	var body struct {
+		JSON json.RawMessage `json:"json"`
+		Raw  string          `json:"raw"`
+	}
+	_ = json.Unmarshal(req.Body, &body)
+	raw := []byte(strings.TrimSpace(body.Raw))
+	if len(body.JSON) > 0 {
+		raw = body.JSON
+	}
+	if len(raw) == 0 {
+		return map[string]any{"success": false, "error": "missing json/raw credential payload"}
+	}
+	sa, err := parseStored(raw)
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	// Normalize to nested plugin shape before save.
+	storage, err := json.Marshal(sa)
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	auth := toAuthData(sa)
+	saveReq := pluginapi.HostAuthSaveRequest{
+		Name: auth.FileName,
+		JSON: storage,
+	}
+	saveBody, _ := json.Marshal(saveReq)
+	rawResp, err := hostCall(pluginabi.MethodHostAuthSave, saveBody)
+	if err != nil {
+		return map[string]any{"success": false, "error": "host.auth.save: " + err.Error()}
+	}
+	var env envelope
+	if err := json.Unmarshal(rawResp, &env); err != nil || !env.OK {
+		msg := "host.auth.save failed"
+		if env.Error != nil && env.Error.Message != "" {
+			msg = env.Error.Message
+		}
+		return map[string]any{"success": false, "error": msg}
+	}
+	var saveResp pluginapi.HostAuthSaveResponse
+	_ = json.Unmarshal(env.Result, &saveResp)
+	return map[string]any{
+		"success":  true,
+		"name":     saveResp.Name,
+		"path":     saveResp.Path,
+		"uid":      sa.Account.UID,
+		"nickname": sa.Account.Nickname,
+		"file":     auth.FileName,
+	}
 }
 
 func handleCheckinConfig(req pluginapi.ManagementRequest) map[string]any {

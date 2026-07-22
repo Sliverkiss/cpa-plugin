@@ -41,3 +41,19 @@ func TestIsEmptyValueRecursion(t *testing.T) {
 		t.Fatal("map with non-empty value must not be empty")
 	}
 }
+
+func TestCleanChunkStripsNoiseFields(t *testing.T) {
+	in := `{"choices":[{"index":0,"delta":{"content":"hi","extra_fields":null,"refusal":"","reasoning_content":""}}]}`
+	got := cleanChunkJSON(in)
+	if got == "" {
+		t.Fatal("chunk dropped")
+	}
+	for _, noise := range []string{"extra_fields", "refusal", "reasoning_content"} {
+		if strings.Contains(got, noise) {
+			t.Fatalf("noise field %s not stripped: %s", noise, got)
+		}
+	}
+	if !strings.Contains(got, `"content":"hi"`) {
+		t.Fatalf("content lost: %s", got)
+	}
+}

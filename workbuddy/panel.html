@@ -18,6 +18,7 @@ button.sec{background:#262b36;color:var(--fg)}button:disabled{opacity:.5;cursor:
 .card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center}
 .uid{color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:12px}
 .badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:99px;background:rgba(62,207,142,.14);color:var(--ok);border:1px solid rgba(62,207,142,.25)}
+.badge.exhausted{background:rgba(255,107,107,.14);color:var(--err);border:1px solid rgba(255,107,107,.3)}
 .badge.pro{background:rgba(255,180,84,.14);color:var(--warn);border:1px solid rgba(255,180,84,.25)}
 .row{display:flex;justify-content:space-between;padding:5px 0;border-top:1px dashed var(--border)}
 .row:first-of-type{border-top:0}.k{color:var(--mut)}.v{font-weight:600}
@@ -63,6 +64,12 @@ button .spin{border-color:#fff;border-top-color:transparent}
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
     <label class="toggle"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到</label>
     <span class="toggle" id="svtime"></span>
+  </div>
+  <div class="card" style="margin-bottom:16px">
+    <h2 style="font-size:14px;margin:0 0 8px">导入凭证 JSON</h2>
+    <div class="sub" style="margin:0 0 8px">支持 nested <code>{"auth":{...},"account":{...}}</code> 或 flat <code>{"accessToken":...}</code>。落盘为 <code>workbuddy-&lt;uid&gt;.json</code>。</div>
+    <textarea id="importRaw" rows="4" placeholder='粘贴 WorkBuddy / CodeBuddy 凭证 JSON' style="width:100%;background:#0f1115;border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--fg);font:12px/1.4 ui-monospace,monospace;resize:vertical"></textarea>
+    <div class="actions"><button class="sec" onclick="importAuth(this)">导入并保存</button></div>
   </div>
   <div id="grid" class="grid"><div class="loading">加载中…</div></div>
 </div>
@@ -150,12 +157,14 @@ function progressHTML(c){
 function card(a){
   const plan=(a.plan||"unknown").toLowerCase();
   const ci=a.checkin||{}, cr=a.credits;
+  const exhausted=!!a.exhausted||(!!cr&&(cr.total_remain||0)===0&&((cr.total_used||0)>0||(cr.packages&&cr.packages.length)));
   const checked=ci.today_checked_in;
   const btnClass=checked?"done":"sec";
   const btnText=checked?"已签到":"签到";
   const btnDisabled=checked?" disabled=\"disabled\"":"";
+  const badges=(exhausted?`<span class="badge exhausted">耗尽</span>`:"")+`<span class="badge ${plan}">${esc(a.plan||"-")}</span>`;
   return `<div class="card">
-  <h2>${esc(a.nickname||a.label||a.name)} <span class="badge ${plan}">${esc(a.plan||"-")}</span></h2>
+  <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
   ${progressHTML(cr)}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
@@ -243,6 +252,22 @@ async function checkinAll(btn){
 }
 async function toggleAuto(on){
   try{const d=await api("/checkin/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});toast("自动签到已"+(d.checkin_auto?"开启 ✅":"关闭 ⏸"),"ok")}catch(e){toast("设置失败","err",e.message)}
+}
+async function importAuth(btn){
+  const raw=(document.getElementById("importRaw").value||"").trim();
+  if(!raw){toast("请粘贴凭证 JSON","warn");return}
+  busy(btn,true);
+  try{
+    let payload={raw};
+    try{payload={json:JSON.parse(raw)}}catch(_){}
+    const d=await api("/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    if(d.success){
+      toast("导入成功","ok",(d.nickname||d.uid||"")+ " → "+(d.file||d.name||""));
+      document.getElementById("importRaw").value="";
+      load(true);
+    }else toast("导入失败","err",d.error||"unknown");
+  }catch(e){toast("导入请求失败","err",e.message)}
+  busy(btn,false);
 }
 document.getElementById("keyInput").addEventListener("keydown",e=>{if(e.key==="Enter")saveKey()});
 if(!getKey())showAuth();

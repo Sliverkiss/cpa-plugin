@@ -283,6 +283,10 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return handleExecExecute(request)
 	case pluginabi.MethodExecutorExecuteStream:
 		return handleExecStream(request)
+	case pluginabi.MethodExecutorCountTokens:
+		// Upstream CodeBuddy has no dedicated count_tokens API. Return
+		// unhandled-style zero estimate so clients fall back / skip.
+		return okEnvelope(pluginapi.ExecutorResponse{Payload: []byte(`{"input_tokens":0}`)})
 	case pluginabi.MethodManagementRegister:
 		return okEnvelope(managementRegistration())
 	case pluginabi.MethodManagementHandle:
@@ -337,7 +341,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.4.0"
+var version = "0.4.1"
 
 func wbRegistration() registration {
 	return registration{
@@ -1588,6 +1592,14 @@ func cleanChunkJSON(s string) string {
 			if v, present := delta["tool_calls"]; present {
 				if arr, isArr := v.([]any); isArr && len(arr) == 0 {
 					delete(delta, "tool_calls")
+					changed = true
+				}
+			}
+			// Upstream often pads terminal/noop deltas with empty noise fields
+			// that clients ignore but pollute wire size / some parsers.
+			for _, noise := range []string{"extra_fields", "refusal", "reasoning_content"} {
+				if v, present := delta[noise]; present && isEmptyValue(v) {
+					delete(delta, noise)
 					changed = true
 				}
 			}
