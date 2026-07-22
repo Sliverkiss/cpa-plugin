@@ -471,19 +471,14 @@ func stopCheckinScheduler() {
 }
 
 func nextCheckinTime(now time.Time) time.Time {
-	var candidates []time.Time
+	var earliest time.Time
 	for _, h := range checkinHours {
 		t := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, now.Location())
-		if t.After(now) {
-			candidates = append(candidates, t)
+		if !t.After(now) {
+			t = t.Add(24 * time.Hour) // slot already passed today → tomorrow
 		}
-		// tomorrow's slot
-		candidates = append(candidates, t.Add(24*time.Hour))
-	}
-	earliest := candidates[0]
-	for _, c := range candidates {
-		if c.Before(earliest) {
-			earliest = c
+		if earliest.IsZero() || t.Before(earliest) {
+			earliest = t
 		}
 	}
 	return earliest
@@ -666,11 +661,15 @@ func handleCheckinConfig(req pluginapi.ManagementRequest) map[string]any {
 	_ = json.Unmarshal(req.Body, &body)
 	checkinAutoMu.Lock()
 	if body.Enabled != nil {
+		// Runtime-only toggle: the CPA host exposes no plugin-config write
+		// callback, so persisting would mean editing the host's config.yaml
+		// from inside the plugin (fragile under docker volume mounts). The
+		// value from config_yaml wins again on CPA restart.
 		checkinAuto = *body.Enabled
 	}
 	cur := checkinAuto
 	checkinAutoMu.Unlock()
-	return map[string]any{"checkin_auto": cur}
+	return map[string]any{"checkin_auto": cur, "persistent": false}
 }
 
 // -----------------------------------------------------------------------------

@@ -66,6 +66,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -108,6 +109,26 @@ var (
 	httpClientOnce sync.Once
 	sharedClient   *http.Client
 )
+
+// loginStatesPruneInterval bounds how often the janitor sweeps abandoned
+// login states (user started a login but never finished).
+const loginStatesPruneInterval = time.Minute
+
+func init() {
+	go func() {
+		ticker := time.NewTicker(loginStatesPruneInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now()
+			loginStates.Range(func(key, value any) bool {
+				if lc, ok := value.(*loginCtx); ok && now.After(lc.expires) {
+					loginStates.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
+}
 
 func main() {}
 
@@ -307,14 +328,17 @@ type registrationCapability struct {
 	ManagementAPI         bool                         `json:"management_api"`
 }
 
+// version is injected at build time via -ldflags "-X main.version=...".
+var version = "0.3.2"
+
 func wbRegistration() registration {
 	return registration{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             providerName,
-			Version:          "0.3.1",
-			Author:           "lovingfish (clean-room rebuild; original workbuddy by Sliverkiss), extended by Sliverkiss",
-			GitHubRepository: "https://github.com/lovingfish/workbuddy-cliproxy",
+			Version:          version,
+			Author:           "Sliverkiss (based on workbuddy by lovingfish)",
+			GitHubRepository: "https://github.com/Sliverkiss/cpa-plugin",
 			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "checkin_auto", Type: "boolean", Description: "Enable daily auto check-in at 09:00 and 21:00 local time (default true)."},
@@ -349,6 +373,34 @@ func wbModels() []pluginapi.ModelInfo {
 	}
 }
 
+// dynamicModelsCacheTTL bounds how long a fetched model list is reused.
+// model.static / model.for_auth are re-invoked by CPA on every config reload
+// and on each models query; without caching, every reload fans out to one
+// upstream call per account.
+const dynamicModelsCacheTTL = 5 * time.Minute
+
+var dynamicModelsCache struct {
+	sync.RWMutex
+	models  []pluginapi.ModelInfo
+	fetched time.Time
+}
+
+func cachedDynamicModels() ([]pluginapi.ModelInfo, bool) {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	if len(dynamicModelsCache.models) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsCacheTTL {
+		return dynamicModelsCache.models, true
+	}
+	return nil, false
+}
+
+func storeDynamicModels(models []pluginapi.ModelInfo) {
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.models = models
+	dynamicModelsCache.fetched = time.Now()
+	dynamicModelsCache.Unlock()
+}
+
 // fetchDynamicModels calls the WorkBuddy API to get the latest model list.
 // Falls back to the hardcoded list on any error.
 // extractAccessToken handles both flat (CPA UI) and nested (plugin OAuth) auth file shapes.
@@ -369,6 +421,9 @@ func extractAccessToken(raw []byte) (string, bool) {
 }
 
 func fetchDynamicModels() []pluginapi.ModelInfo {
+	if models, ok := cachedDynamicModels(); ok {
+		return models
+	}
 	models := wbModels()
 	files, err := hostAuthListFiles()
 	if err != nil || len(files) == 0 {
@@ -388,6 +443,7 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 		}
 		dyn, err := callModelsAPI(accessToken)
 		if err == nil && len(dyn) > 0 {
+			storeDynamicModels(dyn)
 			return dyn
 		}
 	}
@@ -395,6 +451,9 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 }
 
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
+	if models, ok := cachedDynamicModels(); ok {
+		return models
+	}
 	accessToken := ""
 	if len(storageJSON) > 0 {
 		if tok, ok := extractAccessToken(storageJSON); ok {
@@ -405,6 +464,7 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 		return fetchDynamicModels()
 	}
 	if dyn, err := callModelsAPI(accessToken); err == nil && len(dyn) > 0 {
+		storeDynamicModels(dyn)
 		return dyn
 	}
 	return fetchDynamicModels()
@@ -528,11 +588,6 @@ func callModelsAPI(accessToken string) ([]pluginapi.ModelInfo, error) {
 		})
 	}
 	return out, nil
-}
-
-// applyModelPolicy is a no-op placeholder; CPA applies oauth-excluded-models / oauth-model-alias itself.
-func applyModelPolicy(models []pluginapi.ModelInfo, host pluginapi.HostConfigSummary) []pluginapi.ModelInfo {
-	return models
 }
 
 // ------------------------------------------------------------------------------
@@ -797,7 +852,7 @@ func handleModelStatic(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	cacheModelAliases(req.Host)
-	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: applyModelPolicy(fetchDynamicModels(), req.Host)})
+	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: fetchDynamicModels()})
 }
 
 func handleModelForAuth(raw []byte) ([]byte, error) {
@@ -810,7 +865,7 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 	// req.AuthProvider back would silently drop the model list whenever the
 	// auth file carries a non-canonical provider string.
 	cacheModelAliases(req.Host)
-	models := applyModelPolicy(fetchDynamicModelsFromStorage(req.StorageJSON), req.Host)
+	models := fetchDynamicModelsFromStorage(req.StorageJSON)
 	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
 }
 
@@ -944,7 +999,10 @@ func parseStored(raw []byte) (*storedAuth, error) {
 
 func sharedHTTPClient() *http.Client {
 	httpClientOnce.Do(func() {
-		jar, _ := cookiejar.New(nil)
+		// No cookie jar here: auth is carried by Bearer headers, and a shared
+		// jar would leak upstream set-cookie state across accounts (multi-account
+		// deployments could cross-contaminate sessions). Only the short-lived
+		// login clients get a jar.
 		sharedClient = &http.Client{
 			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
@@ -952,7 +1010,6 @@ func sharedHTTPClient() *http.Client {
 				IdleConnTimeout:     90 * time.Second,
 				MaxIdleConnsPerHost: 5,
 			},
-			Jar: jar,
 		}
 	})
 	return sharedClient
@@ -1123,12 +1180,19 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 
 	// Single-shot poll per RPC: the host drives the polling cadence.
 	// auth/token is the authoritative login-status endpoint: the application
-	// layer returns code 11217 ("login ing") while pending, and code 0 with the
-	// token bundle once complete. login/account sits behind the openresty gateway
-	// and is rejected (401) until login finishes, so probe token first and only
-	// fetch account once we hold a bearer.
-	tokRaw, _, errTok := doJSON(lc.client, http.MethodGet, endpointAuthToken+state, nil, nil)
+	// layer returns a non-zero code ("login ing") while pending, and code 0
+	// with the token bundle once complete. login/account sits behind the
+	// openresty gateway and is rejected (401) until login finishes, so probe
+	// token first and only fetch account once we hold a bearer.
+	tokRaw, status, errTok := doJSON(lc.client, http.MethodGet, endpointAuthToken+state, nil, nil)
 	if errTok != nil {
+		// Transport-level failures and 5xx are real errors, not "still waiting":
+		// surface them so the user sees a failure instead of polling until TTL.
+		if status == 0 || status >= 500 {
+			loginStates.Delete(state)
+			return nil, fmt.Errorf("poll: token endpoint error: %w", errTok)
+		}
+		// 4xx / business-code responses mean the login is still pending.
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
 			Status:  pluginapi.AuthLoginStatusPending,
 			Message: "waiting for login",
@@ -1364,6 +1428,14 @@ func pumpUpstreamStream(httpReq *http.Request, streamID string, sseFramed bool, 
 			break
 		}
 	}
+	// A mid-stream read failure means the client received a truncated stream:
+	// surface it as an error frame and record the attempt as failed.
+	if err := scanner.Err(); err != nil {
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, err.Error())
+		streamEmitError(streamID, fmt.Sprintf("upstream stream read error: %v", err))
+		streamClose(streamID)
+		return
+	}
 	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
 	streamClose(streamID)
 }
@@ -1387,7 +1459,11 @@ func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collecto
 		errPayload, _ := io.ReadAll(resp.Body)
 		return nil, resp.StatusCode, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(errPayload), 200))
 	}
-	return aggregateSSEWithCollector(resp.Body, sseFramed, collector), resp.StatusCode, nil
+	chunks, errAgg := aggregateSSEWithCollector(resp.Body, sseFramed, collector)
+	if errAgg != nil {
+		return chunks, resp.StatusCode, errAgg
+	}
+	return chunks, resp.StatusCode, nil
 }
 
 // clientNeedsSSEFrame reports whether chunk payloads must carry their own
@@ -1407,16 +1483,17 @@ func clientNeedsSSEFrame(metadata map[string]any) bool {
 }
 
 // aggregateSSE reads an upstream SSE stream and emits one chunk per data event.
-// Empty-valued delta fields are stripped and the trailing [DONE] is dropped
+// Empty tool-call shells are stripped and the trailing [DONE] is dropped
 // (the host appends its own stream terminator). When sseFramed is true each
 // payload is emitted as a "data: " line for cross-format translators; otherwise
 // the payload is the raw JSON object and the host chat-completions writer adds
-// the framing itself.
-func aggregateSSE(r io.Reader, sseFramed bool) []pluginapi.ExecutorStreamChunk {
+// the framing itself. A mid-stream read error aborts collection and is
+// returned so the caller records the attempt as failed.
+func aggregateSSE(r io.Reader, sseFramed bool) ([]pluginapi.ExecutorStreamChunk, error) {
 	return aggregateSSEWithCollector(r, sseFramed, nil)
 }
 
-func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageCollector) []pluginapi.ExecutorStreamChunk {
+func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var chunks []pluginapi.ExecutorStreamChunk
@@ -1437,30 +1514,57 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 		}
 		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: []byte(cleaned)})
 	}
-	return chunks
+	if err := scanner.Err(); err != nil {
+		return chunks, fmt.Errorf("upstream stream read error: %w", err)
+	}
+	return chunks, nil
 }
 
-// cleanChunkJSON strips empty-valued fields (null/""/[]/{}) from choice deltas
-// so strict clients don't trip on {"function_call":null,"tool_calls":[]}.
+// cleanChunkJSON strips only the known-problematic empty tool-call shells
+// from choice deltas: a null/empty function_call and an empty tool_calls array
+// (CodeBuddy emits these on the terminal chunk, and strict clients interpret
+// them as a truncated tool call). Other empty-but-legal values are preserved:
+// content:"" is a valid delta (pure tool-call chunk) and the role-only first
+// chunk must survive so clients can establish the message role.
 func cleanChunkJSON(s string) string {
 	var obj map[string]any
 	if json.Unmarshal([]byte(s), &obj) != nil {
 		return s
 	}
+	changed := false
 	if choices, ok := obj["choices"].([]any); ok {
 		for _, c := range choices {
 			choice, ok := c.(map[string]any)
 			if !ok {
 				continue
 			}
-			if delta, ok := choice["delta"].(map[string]any); ok {
-				for k, v := range delta {
-					if isEmptyValue(v) {
-						delete(delta, k)
-					}
+			delta, ok := choice["delta"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if v, present := delta["function_call"]; present && isEmptyValue(v) {
+				delete(delta, "function_call")
+				changed = true
+			}
+			if v, present := delta["tool_calls"]; present {
+				if arr, isArr := v.([]any); isArr && len(arr) == 0 {
+					delete(delta, "tool_calls")
+					changed = true
+				}
+			}
+			// Drop a fully-empty delta ONLY when the choice carries no other
+			// signal (no finish_reason): e.g. {"delta":{"function_call":null}}
+			// reduced to {}. A delta with role/content:"" is meaningful and
+			// never reaches this branch (those fields are preserved above).
+			if len(delta) == 0 {
+				if fr, _ := choice["finish_reason"].(string); fr == "" {
+					return ""
 				}
 			}
 		}
+	}
+	if !changed {
+		return s
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {
@@ -1601,7 +1705,13 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	var content, reasoning, role, respModel, respID, finish string
 	var created int64
 	var usage map[string]any
-	var toolCalls []map[string]any
+	// tool_calls arrive as streaming deltas: each chunk carries an index plus a
+	// partial call (id/type/function.name on the first delta, argument text
+	// fragments afterwards). Merge by index instead of appending raw fragments
+	// so the folded completion holds whole calls.
+	toolCalls := map[int]map[string]any{}
+	var toolOrder []int
+	var scanErr error
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
@@ -1641,9 +1751,21 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 				}
 				if tcs, ok := delta["tool_calls"].([]any); ok {
 					for _, tc := range tcs {
-						if call, ok := tc.(map[string]any); ok {
-							toolCalls = append(toolCalls, call)
+						call, ok := tc.(map[string]any)
+						if !ok {
+							continue
 						}
+						idx := 0
+						if v, ok := call["index"].(float64); ok {
+							idx = int(v)
+						}
+						merged, seen := toolCalls[idx]
+						if !seen {
+							merged = map[string]any{"index": idx}
+							toolCalls[idx] = merged
+							toolOrder = append(toolOrder, idx)
+						}
+						mergeToolCallDelta(merged, call)
 					}
 				}
 			}
@@ -1652,13 +1774,21 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		scanErr = err
+	}
 
 	message := map[string]any{"role": firstNonEmpty(role, "assistant"), "content": content}
 	if reasoning != "" {
 		message["reasoning_content"] = reasoning
 	}
-	if len(toolCalls) > 0 {
-		message["tool_calls"] = toolCalls
+	if len(toolOrder) > 0 {
+		sort.Ints(toolOrder)
+		calls := make([]map[string]any, 0, len(toolOrder))
+		for _, idx := range toolOrder {
+			calls = append(calls, toolCalls[idx])
+		}
+		message["tool_calls"] = calls
 	}
 	if created == 0 {
 		created = time.Now().Unix()
@@ -1681,7 +1811,43 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A mid-stream read failure means the folded completion is truncated; the
+	// caller must treat this as an upstream failure, not a success.
+	if scanErr != nil {
+		return out, fmt.Errorf("upstream stream read error: %w", scanErr)
+	}
 	return out, nil
+}
+
+// mergeToolCallDelta folds one streaming tool_call fragment into the merged
+// call: scalar fields (id/type) are taken when first seen, function.name is
+// concatenated (upstream may split it), and function.arguments text fragments
+// are appended in arrival order.
+func mergeToolCallDelta(merged, delta map[string]any) {
+	for _, k := range []string{"id", "type"} {
+		if _, present := merged[k]; !present {
+			if v, ok := delta[k].(string); ok && v != "" {
+				merged[k] = v
+			}
+		}
+	}
+	dfn, _ := delta["function"].(map[string]any)
+	if dfn == nil {
+		return
+	}
+	mfn, _ := merged["function"].(map[string]any)
+	if mfn == nil {
+		mfn = map[string]any{}
+		merged["function"] = mfn
+	}
+	if v, ok := dfn["name"].(string); ok && v != "" {
+		cur, _ := mfn["name"].(string)
+		mfn["name"] = cur + v
+	}
+	if v, ok := dfn["arguments"].(string); ok && v != "" {
+		cur, _ := mfn["arguments"].(string)
+		mfn["arguments"] = cur + v
+	}
 }
 
 func firstNonEmpty(vals ...string) string {
