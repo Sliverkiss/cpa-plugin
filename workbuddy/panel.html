@@ -59,7 +59,7 @@ button .spin{border-color:#fff;border-top-color:transparent}
     </div>
   </div>
   <div class="bar">
-    <button onclick="load(true)">刷新数据</button>
+    <button id="refreshBtn" onclick="load(true,this)">刷新数据</button>
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
     <label class="toggle"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到</label>
     <span class="toggle" id="svtime"></span>
@@ -168,17 +168,48 @@ async function api(path, opts={}){
   if(r.status===401){sessionStorage.removeItem(SS_KEY);showAuth();throw new Error("management key 无效或缺失")}
   return r.json();
 }
-async function load(force){
+async function load(force, btn){
   const g=document.getElementById("grid");
+  // 刷新按钮：loading 态 + 右上角 toast。原先 force 路径静默调 /refresh，
+  // 成功/失败都无反馈（签到按钮有 toast，刷新没有）。
+  if(force){
+    if(!btn) btn=document.getElementById("refreshBtn");
+    busy(btn, true);
+  }
   try{
-    if(force){try{await api("/refresh",{method:"POST"})}catch(e){}}
-    const d=await api("/accounts");
+    // force 时 /refresh 已返回完整 dashboard（buildDashboard(true)），
+    // 不必再打 /accounts（之前多一次请求且吞掉 refresh 错误）。
+    const d = force
+      ? await api("/refresh", {method:"POST"})
+      : await api("/accounts");
     document.getElementById("autoToggle").checked=!!d.checkin_auto;
     document.getElementById("svtime").textContent="服务器时间 "+(d.server_time||"");
-    if(d.error){g.innerHTML='<div class="loading">'+esc(d.error)+"</div>";return}
-    if(!d.accounts||!d.accounts.length){g.innerHTML='<div class="loading">暂无 WorkBuddy 账号</div>';return}
-    g.innerHTML=d.accounts.map(card).join("");
-  }catch(e){g.innerHTML='<div class="loading">'+esc(e.message)+"</div>"}
+    if(d.error){
+      g.innerHTML='<div class="loading">'+esc(d.error)+"</div>";
+      if(force) toast("刷新失败", "err", d.error);
+      return;
+    }
+    const accounts=d.accounts||[];
+    if(!accounts.length){
+      g.innerHTML='<div class="loading">暂无 WorkBuddy 账号</div>';
+      if(force) toast("数据已刷新", "warn", "暂无 WorkBuddy 账号");
+      return;
+    }
+    g.innerHTML=accounts.map(card).join("");
+    if(force){
+      const errN=accounts.filter(a=>a.error).length;
+      if(errN) toast("数据已刷新", "warn", accounts.length+" 个账号 · "+errN+" 个有错误");
+      else toast("数据已刷新", "ok", accounts.length+" 个账号");
+    }
+  }catch(e){
+    if(force) toast("刷新失败", "err", e.message||String(e));
+    // 强制刷新失败时保留旧卡片，只 toast；首次加载仍写错误到 grid。
+    if(!force || !g.querySelector(".card")){
+      g.innerHTML='<div class="loading">'+esc(e.message||String(e))+"</div>";
+    }
+  }finally{
+    if(force) busy(btn, false);
+  }
 }
 function checkinResultToast(res, who){
   const name=res.nickname||who||"账号";

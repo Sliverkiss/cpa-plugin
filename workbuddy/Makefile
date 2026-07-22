@@ -1,5 +1,5 @@
 PLUGIN_ID ?= workbuddy
-VERSION ?= 0.3.15
+VERSION ?= 0.3.16
 GO ?= go
 GOOS ?= $(shell $(GO) env GOOS)
 GOARCH ?= $(shell $(GO) env GOARCH)
