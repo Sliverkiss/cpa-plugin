@@ -254,8 +254,9 @@ func hostAuthPersistMigrate(name, path, legacyPath string, raw []byte) error {
 	// If path was legacy and name is canonical, also write canonical path next to it.
 	if legacyPath != "" && !strings.EqualFold(filepath.Base(legacyPath), name) {
 		// host.auth.save already wrote name under auth dir; drop legacy file.
-		if isSafeWorkbuddyAuthPath(legacyPath) && isLegacyWorkbuddyAuthName(filepath.Base(legacyPath)) {
-			_ = os.Remove(legacyPath)
+		// A-36: use deleteAuthFileInDir (abs path + dir confine) for consistency.
+		if isLegacyWorkbuddyAuthName(filepath.Base(legacyPath)) {
+			_ = deleteAuthFileInDir(legacyPath, filepath.Dir(legacyPath))
 		}
 	}
 	// If path points at legacy but name is uid form, do not dual-write path (would keep legacy alive).
@@ -618,8 +619,9 @@ func deleteAuth(authIndex string, sa *storedAuth) error {
 	if sa != nil && strings.TrimSpace(sa.Account.UID) != "" {
 		if dir := filepath.Dir(path); dir != "" {
 			legacy := filepath.Join(dir, authFileName)
-			if isSafeWorkbuddyAuthPath(legacy) && isLegacyWorkbuddyAuthName(filepath.Base(legacy)) {
-				_ = os.Remove(legacy)
+			// A-36: same path safety as primary deleteAuthFileInDir.
+			if isLegacyWorkbuddyAuthName(filepath.Base(legacy)) {
+				_ = deleteAuthFileInDir(legacy, dir)
 			}
 		}
 	}
