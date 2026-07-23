@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2
+
+### Fixed
+- **Credits look frozen after chat**: cache TTL 5m→45s; invalidate cache after successful chat (stream + non-stream)
+- **Spend math**: package used = cycle size−remain; account total_size from package sizes; TotalDosage treated as capacity pool (not consumption)
+- **Check-in packs inflate "available"**: UI labels 可用/已用/额度池 so grant vs spend is visible; note shows 余/已用/池
+
 ## 0.6.1
 
 ### Added
