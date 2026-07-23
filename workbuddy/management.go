@@ -81,6 +81,9 @@ func configure(raw []byte) {
 	checkinAutoMu.Lock()
 	defer checkinAutoMu.Unlock()
 	checkinAuto = true
+	lifecycleAutoMu.Lock()
+	lifecycleAuto = true
+	lifecycleAutoMu.Unlock()
 	schedulerModeMu.Lock()
 	defer schedulerModeMu.Unlock()
 	schedulerMode = schedulerModeOff // reset to default on reconfigure
@@ -94,6 +97,13 @@ func configure(raw []byte) {
 				if strings.HasPrefix(line, "checkin_auto:") {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "checkin_auto:"))
 					checkinAuto = v == "true" || v == "1" || v == "yes" || v == "on"
+				}
+				if strings.HasPrefix(line, "lifecycle_auto:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "lifecycle_auto:"))
+					v = strings.Trim(v, "\"'")
+					lifecycleAutoMu.Lock()
+					lifecycleAuto = v == "true" || v == "1" || v == "yes" || v == "on"
+					lifecycleAutoMu.Unlock()
 				}
 				if strings.HasPrefix(line, "scheduler_mode:") {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "scheduler_mode:"))
@@ -117,19 +127,20 @@ func configure(raw []byte) {
 
 // wbAccount is one row of the dashboard.
 type wbAccount struct {
-	AuthIndex  string          `json:"auth_index"`
-	Name       string          `json:"name"`
-	Label      string          `json:"label"`
-	Nickname   string          `json:"nickname"`
-	UID        string          `json:"uid"`
-	Region     string          `json:"region"` // "cn" or "global"
-	Plan       string          `json:"plan"`
-	Status     string          `json:"status"`
-	Exhausted  bool            `json:"exhausted"`
-	Credits    *creditsSummary `json:"credits,omitempty"`
-	Checkin    *checkinSummary `json:"checkin,omitempty"`
-	TrialClaimed bool          `json:"trial_claimed,omitempty"` // Global: expert trial already claimed
-	Error      string          `json:"error,omitempty"`
+	AuthIndex    string          `json:"auth_index"`
+	Name         string          `json:"name"`
+	Label        string          `json:"label"`
+	Nickname     string          `json:"nickname"`
+	UID          string          `json:"uid"`
+	Region       string          `json:"region"` // "cn" or "global"
+	Plan         string          `json:"plan"`
+	Status       string          `json:"status"`
+	Disabled     bool            `json:"disabled"`
+	Exhausted    bool            `json:"exhausted"`
+	Credits      *creditsSummary `json:"credits,omitempty"`
+	Checkin      *checkinSummary `json:"checkin,omitempty"`
+	TrialClaimed bool            `json:"trial_claimed,omitempty"` // Global: expert trial already claimed
+	Error        string          `json:"error,omitempty"`
 }
 
 type creditsSummary struct {
@@ -681,12 +692,20 @@ func buildDashboard(force bool) map[string]any {
 				Name:      f.Name,
 				Label:     f.Label,
 				Status:    f.Status,
+				Disabled:  f.Disabled,
 			}
 			sa, err := hostAuthGet(f.AuthIndex)
 			if err != nil {
 				acct.Error = "load auth: " + err.Error()
 				out[i] = acct
 				return
+			}
+			// Physical file is source of truth for disabled (host list may lag).
+			if phys, perr := hostAuthGetPhysical(f.AuthIndex); perr == nil {
+				acct.Disabled = phys.Disabled
+				if phys.Name != "" {
+					acct.Name = phys.Name
+				}
 			}
 			acct.Nickname = sa.Account.Nickname
 			acct.UID = sa.Account.UID
@@ -699,20 +718,52 @@ func buildDashboard(force bool) map[string]any {
 			if isGlobalDomain(sa.Auth.Domain) {
 				acct.TrialClaimed = hasTrialPack(cr)
 			}
+			// Keep note in sync (throttled); do not block dashboard on save errors.
+			_ = syncAuthNote(f.AuthIndex, sa, cr, acct.Disabled)
 			acct.Error = strings.Join(errs, "; ")
 			out[i] = acct
 		}(i, f)
 	}
 	wg.Wait()
+	// After refresh (force), run lifecycle so exhaust→disable/delete is immediate.
+	var life []map[string]any
+	if force && lifecycleEnabled() {
+		life = reconcileAllAccounts(true)
+		// Drop accounts deleted during reconcile (Global exhaust).
+		if len(life) > 0 {
+			// Rebuild list without missing files (best-effort).
+			if files2, err2 := hostAuthList(); err2 == nil {
+				live := make(map[string]struct{}, len(files2))
+				for _, f := range files2 {
+					live[f.AuthIndex] = struct{}{}
+				}
+				filtered := out[:0]
+				for _, a := range out {
+					if _, ok := live[a.AuthIndex]; ok {
+						filtered = append(filtered, a)
+					}
+				}
+				// Preserve capacity if all still present.
+				if len(filtered) != len(out) {
+					out = filtered
+				}
+			}
+		}
+	}
 	checkinAutoMu.RLock()
 	auto := checkinAuto
 	checkinAutoMu.RUnlock()
-	return map[string]any{
-		"accounts":     out,
-		"checkin_auto": auto,
-		"schedule":     []string{"09:00", "21:00"},
-		"server_time":  time.Now().Format("2006-01-02 15:04:05"),
+	resp := map[string]any{
+		"accounts":        out,
+		"checkin_auto":    auto,
+		"lifecycle_auto":  lifecycleEnabled(),
+		"schedule":        []string{"09:00", "21:00"},
+		"server_time":     time.Now().Format("2006-01-02 15:04:05"),
 	}
+	if len(life) > 0 {
+		resp["lifecycle"] = life
+	}
+	return resp
 }
 
 // -----------------------------------------------------------------------------
@@ -767,11 +818,15 @@ func schedulerLoop(stop chan struct{}) {
 	}
 }
 
+// runAutoCheckin is the scheduled lifecycle tick (09:00 / 21:00).
+// CN: optional daily check-in, then reconcile (disable exhausted / reenable after credits).
+// Global: no auto trial (one-shot claim is manual only); reconcile may delete exhausted auths.
 func runAutoCheckin() {
 	checkinAutoMu.RLock()
-	enabled := checkinAuto
+	doCheckin := checkinAuto
 	checkinAutoMu.RUnlock()
-	if !enabled {
+	// Lifecycle may still run when check-in is off (credit gate).
+	if !doCheckin && !lifecycleEnabled() {
 		return
 	}
 	files, err := hostAuthList()
@@ -784,25 +839,24 @@ func runAutoCheckin() {
 			continue
 		}
 		if isGlobalDomain(sa.Auth.Domain) {
-			// Global account: auto-claim expert trial pack if not yet claimed.
-			// The trial is one-time (250 credits / 14 days); hasTrialPack prevents
-			// re-calling /billing/ide/trial after a successful claim.
-			cr, err := fetchUserResource(sa)
-			if err == nil && !hasTrialPack(cr) {
-				_, _ = performTrialCall(sa)
+			// Global: never auto-claim trial. Lifecycle handles exhaust→delete.
+			accountCache.Delete(f.AuthIndex)
+			if lifecycleEnabled() {
+				_, _ = reconcileOneAccount(f.AuthIndex, true)
 			}
-		} else {
-			// CN account: daily check-in.
+			continue
+		}
+		// CN: daily check-in when enabled, then lifecycle (reenable/disable).
+		if doCheckin {
 			ci, err := fetchCheckinStatus(sa)
-			if err != nil {
-				continue
-			}
-			if ci.Active && !ci.TodayCheckedIn {
+			if err == nil && ci.Active && !ci.TodayCheckedIn {
 				_, _ = performCheckinCall(sa)
 			}
 		}
-		// Refresh cache for panel regardless.
 		accountCache.Delete(f.AuthIndex)
+		if lifecycleEnabled() {
+			_, _ = reconcileOneAccount(f.AuthIndex, true)
+		}
 	}
 }
 
@@ -942,6 +996,10 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 			})
 			accountCache.Delete(f.AuthIndex)
 			mu.Unlock()
+			// After unlock: recheck credits (reenable may take the same lock).
+			if lifecycleEnabled() {
+				_, _ = reconcileOneAccount(f.AuthIndex, true)
+			}
 			continue
 		}
 		res, err := performCheckinCall(sa)
@@ -956,6 +1014,10 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 		results = append(results, out)
 		accountCache.Delete(f.AuthIndex)
 		mu.Unlock()
+		// After unlock: re-evaluate credits → may reenable or keep disabled.
+		if lifecycleEnabled() {
+			_, _ = reconcileOneAccount(f.AuthIndex, true)
+		}
 	}
 	return map[string]any{"results": results}
 }
@@ -988,15 +1050,15 @@ func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
 	if err != nil {
 		return map[string]any{"success": false, "error": err.Error()}
 	}
-	// Normalize to nested plugin shape before save.
-	storage, err := json.Marshal(sa)
+	// Persist nested storage + top-level type/note/logo/disabled for Auth page.
+	fileJSON, err := buildAuthFileJSON(sa, false, displayNote(sa, nil, false), nil)
 	if err != nil {
 		return map[string]any{"success": false, "error": err.Error()}
 	}
 	auth := toAuthData(sa)
 	saveReq := pluginapi.HostAuthSaveRequest{
 		Name: auth.FileName,
-		JSON: storage,
+		JSON: fileJSON,
 	}
 	saveBody, _ := json.Marshal(saveReq)
 	rawResp, err := hostCall(pluginabi.MethodHostAuthSave, saveBody)
@@ -1077,6 +1139,9 @@ func handleClaimTrial(req pluginapi.ManagementRequest) map[string]any {
 			}
 		}
 		accountCache.Delete(authIndex) // refresh cache
+		if lifecycleEnabled() {
+			_, _ = reconcileOneAccount(authIndex, true)
+		}
 		return out
 	}
 	return map[string]any{"error": "account not found"}
