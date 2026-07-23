@@ -605,6 +605,31 @@ func reconcileAfterExecutorError(authIndex string, status int, body string) {
 	}()
 }
 
+// reconcileByUID finds workbuddy auth by account UID and applies executor-error lifecycle.
+func reconcileByUID(uid string, status int, body string) {
+	uid = strings.TrimSpace(uid)
+	if uid == "" || !lifecycleEnabled() {
+		return
+	}
+	if !isHardCreditError(status, body) {
+		return
+	}
+	files, err := hostAuthList()
+	if err != nil {
+		return
+	}
+	for _, f := range files {
+		sa, err := hostAuthGet(f.AuthIndex)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(sa.Account.UID) == uid {
+			_, _ = reconcileOneAccount(f.AuthIndex, true)
+			return
+		}
+	}
+}
+
 // enrichAuthMetadata builds Metadata map for AuthData (type/logo/note/disabled).
 func enrichAuthMetadata(sa *storedAuth, cr *creditsSummary, disabled bool) map[string]any {
 	note := displayNote(sa, cr, disabled)

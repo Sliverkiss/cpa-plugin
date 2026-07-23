@@ -341,7 +341,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.5.0"
+var version = "0.6.0"
 
 func wbRegistration() registration {
 	return registration{
@@ -353,7 +353,8 @@ func wbRegistration() registration {
 			GitHubRepository: "https://github.com/Sliverkiss/cpa-plugin",
 			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 and 21:00 local time (default true)."},
+				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 and 21:00 local time for CN accounts (default true)."},
+				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto disable CN / delete Global when credits exhausted; re-enable CN after check-in restores credits (default true)."},
 				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning."},
 				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining)."},
 			},
@@ -1150,31 +1151,30 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 }
 
 func toAuthData(sa *storedAuth) pluginapi.AuthData {
+	return toAuthDataOpts(sa, nil, false)
+}
+
+// toAuthDataOpts builds AuthData with optional credits snapshot and disabled flag.
+func toAuthDataOpts(sa *storedAuth, cr *creditsSummary, disabled bool) pluginapi.AuthData {
 	storage, _ := json.Marshal(sa)
 	id := providerName
 	fileName := authFileName
-	label := "WorkBuddy"
 	if sa != nil && strings.TrimSpace(sa.Account.UID) != "" {
 		id = sa.Account.UID
 		fileName = "workbuddy-" + sa.Account.UID + ".json"
-		if strings.TrimSpace(sa.Account.Nickname) != "" {
-			label = sa.Account.Nickname
-		}
 	}
+	label := labelForAuth(sa)
+	meta := enrichAuthMetadata(sa, cr, disabled)
 	return pluginapi.AuthData{
 		Provider:    providerName,
 		ID:          id,
 		FileName:    fileName,
 		Label:       label,
+		Disabled:    disabled,
 		StorageJSON: storage,
 		// Standardized auth metadata. `type` is required by the host for
-		// auth-file classification; `logo` lets the management UI show the
-		// provider icon on auth rows (frontend reads e.logo || e.metadata.logo).
-		Metadata: map[string]any{
-			"type":     providerName,
-			"provider": providerName,
-			"logo":     pluginLogoURL,
-		},
+		// auth-file classification; `logo`/`note`/`disabled` surface on auth rows.
+		Metadata: meta,
 	}
 }
 
@@ -1372,6 +1372,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	if resp.StatusCode >= 400 {
 		payload, _ := io.ReadAll(resp.Body)
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, resp.StatusCode, string(payload))
+		reconcileAfterExecutorError(req.AuthID, resp.StatusCode, string(payload))
 		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(payload), 200))
 	}
 	completion, err := aggregateCompletion(resp.Body, req.Model)
@@ -1464,6 +1465,11 @@ func pumpUpstreamStream(httpReq *http.Request, streamID string, sseFramed bool, 
 	if resp.StatusCode >= 400 {
 		errPayload, _ := io.ReadAll(resp.Body)
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, resp.StatusCode, string(errPayload))
+		// AuthID is not on pump signature — resolve via authUID best-effort from cache is weak.
+		// Re-fetch list matching uid for lifecycle (async).
+		if authUID != "" {
+			go reconcileByUID(authUID, resp.StatusCode, string(errPayload))
+		}
 		streamEmitError(streamID, fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncate(string(errPayload), 200)))
 		streamClose(streamID)
 		return
@@ -1517,6 +1523,9 @@ func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collecto
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		errPayload, _ := io.ReadAll(resp.Body)
+		if sa != nil && sa.Account.UID != "" {
+			go reconcileByUID(sa.Account.UID, resp.StatusCode, string(errPayload))
+		}
 		return nil, resp.StatusCode, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(errPayload), 200))
 	}
 	chunks, errAgg := aggregateSSEWithCollector(resp.Body, sseFramed, collector)
