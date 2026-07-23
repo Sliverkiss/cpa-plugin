@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1
+
+### Added
+- WorkBuddy panel **用量汇总**：筛选范围内 剩余/已用/总量/占比 + 进度条；全部视图附 CN/Global 分项
+- Dashboard API `summary` 字段：`total_remain` / `total_used` / 分区域统计
+
+### Notes
+- CPAMP Auth 页进度条仅支持内置 `codex/claude/kimi/xai/antigravity`（`QUOTA_PROVIDER_TYPES` 白名单）；workbuddy 无法靠 `note` 注入进度条，完整用量看插件面板
+
 ## 0.6.0
 
 ### Added
