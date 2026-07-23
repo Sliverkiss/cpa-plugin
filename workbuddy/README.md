@@ -14,9 +14,10 @@ Tencent **CodeBuddy** (`copilot.tencent.com`) provider plugin for [CLIProxyAPI (
 - **动态模型**：上游 models API + 5min 缓存 + 硬编码 fallback
 - **Executor**：流/非流 SSE 聚合、cleanChunk、跨协议 framing、alias 反解、tool_choice 归一
 - **Usage 上报**：`usage.PublishRecord` 三出口
-- **签到**：09:00 / 21:00 + 面板手动；多标签 per-account 锁
-- **积分面板**：耗尽角标、进度条、导入凭证按钮（弹窗粘贴 JSON）
-- **Scheduler**（可选）：`scheduler_mode: off|credits`（**默认 off**）
+- **签到**：CN 09:00 / 21:00 + 面板手动；多标签 per-account 锁；**Global 不定时领 trial**
+- **积分生命周期**：CN 耗尽自动 `disabled`；有积分/签到后再开；Global 耗尽**删除** auth 文件
+- **积分面板**：耗尽/禁用角标、进度条、CN/Global 筛选、导入凭证、防 management key IP 封禁
+- **Scheduler**（可选）：`scheduler_mode: off|credits`（**默认 off**）；credits 优先非耗尽账号
 - **OAuth 别名/排除**：由 CPA 宿主 `oauth-model-alias` / `oauth-excluded-models` 处理
 
 ### 安装
@@ -25,16 +26,8 @@ Tencent **CodeBuddy** (`copilot.tencent.com`) provider plugin for [CLIProxyAPI (
 
 ```bash
 # linux/amd64（x86_64 服务器）
-unzip workbuddy_0.4.1_linux_amd64.zip   # → workbuddy.so
+unzip workbuddy_0.6.0_linux_amd64.zip   # → workbuddy.so
 cp workbuddy.so /path/to/cliproxyapi/plugins/workbuddy.so
-
-# linux/arm64
-# unzip workbuddy_0.4.1_linux_arm64.zip
-
-# macOS
-# unzip workbuddy_0.4.1_darwin_arm64.zip  # → workbuddy.dylib
-# Windows
-# unzip workbuddy_0.4.1_windows_amd64.zip # → workbuddy.dll
 ```
 
 也可放在平台子目录：`plugins/linux/amd64/`、`plugins/darwin/arm64/` 等。
@@ -46,8 +39,9 @@ plugins:
   configs:
     workbuddy:
       enabled: true
-      # checkin_auto: true
-      # scheduler_mode: off   # or credits
+      # checkin_auto: true      # CN 定时签到
+      # lifecycle_auto: true    # 耗尽关/删、回血再开
+      # scheduler_mode: off     # or credits
 ```
 
 重启 CPA。
@@ -56,7 +50,16 @@ plugins:
 
 1. CPA 管理端 OAuth 选择 WorkBuddy 完成授权；或  
 2. 面板「导入凭证」弹窗粘贴 JSON → `POST .../import`  
-3. 落盘：`auths/workbuddy-<uid>.json`（多账号不覆盖）
+3. 落盘：`auths/workbuddy-<uid>.json`（含 `type`/`note`/`disabled` + nested auth）
+
+### 生命周期规则
+
+| 区域 | 积分耗尽 | 之后 |
+|------|----------|------|
+| CN | 写 `disabled:true` | 签到/刷新后有积分 → 再打开 |
+| Global | **删除文件** | 需重新登录/导入 |
+
+Auth 页 CPAMP 备注行显示 `note`（区域+积分摘要）。筛选图标「W」属 CPAMP 前端静态表，**插件无法改成 logo**；完整管理用侧栏 WorkBuddy 面板。
 
 ### 预期模型
 
