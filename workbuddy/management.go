@@ -772,17 +772,64 @@ func buildDashboard(force bool) map[string]any {
 	checkinAutoMu.RLock()
 	auto := checkinAuto
 	checkinAutoMu.RUnlock()
+	// Aggregate credits for panel/API consumers (all accounts currently in out).
+	sum := summarizeCredits(out)
 	resp := map[string]any{
-		"accounts":        out,
-		"checkin_auto":    auto,
-		"lifecycle_auto":  lifecycleEnabled(),
-		"schedule":        []string{"09:00", "21:00"},
-		"server_time":     time.Now().Format("2006-01-02 15:04:05"),
+		"accounts":       out,
+		"checkin_auto":   auto,
+		"lifecycle_auto": lifecycleEnabled(),
+		"schedule":       []string{"09:00", "21:00"},
+		"server_time":    time.Now().Format("2006-01-02 15:04:05"),
+		"summary":        sum,
 	}
 	if len(life) > 0 {
 		resp["lifecycle"] = life
 	}
 	return resp
+}
+
+// summarizeCredits aggregates remain/used across dashboard accounts.
+func summarizeCredits(accounts []wbAccount) map[string]any {
+	var remain, used, cnRemain, cnUsed, glRemain, glUsed int64
+	var known, disabledN, exhaustedN int
+	for _, a := range accounts {
+		if a.Disabled {
+			disabledN++
+		}
+		if a.Exhausted {
+			exhaustedN++
+		}
+		if a.Credits == nil {
+			continue
+		}
+		cr := a.Credits
+		if cr.TotalRemain == 0 && cr.TotalUsed == 0 && len(cr.Packages) == 0 {
+			continue
+		}
+		known++
+		remain += cr.TotalRemain
+		used += cr.TotalUsed
+		if a.Region == "global" {
+			glRemain += cr.TotalRemain
+			glUsed += cr.TotalUsed
+		} else {
+			cnRemain += cr.TotalRemain
+			cnUsed += cr.TotalUsed
+		}
+	}
+	return map[string]any{
+		"account_count":   len(accounts),
+		"known_count":     known,
+		"disabled_count":  disabledN,
+		"exhausted_count": exhaustedN,
+		"total_remain":    remain,
+		"total_used":      used,
+		"total":           remain + used,
+		"cn_remain":       cnRemain,
+		"cn_used":         cnUsed,
+		"global_remain":   glRemain,
+		"global_used":     glUsed,
+	}
 }
 
 // -----------------------------------------------------------------------------
