@@ -698,10 +698,10 @@ func cachedAccountDetails(authIndex string, sa *storedAuth, force bool) (plan st
 	if v, ok := accountCache.Load(authIndex); ok {
 		prev = v.(*accountCacheEntry)
 		if !force && time.Since(prev.fetched) < accountCacheTTL {
-			// Ensure cached credits still expose when they were fetched.
-			if prev.credits != nil && prev.credits.FetchedAt == "" {
-				prev.credits.FetchedAt = prev.fetched.UTC().Format(time.RFC3339)
-			}
+			// Return cached values. Do NOT mutate prev.credits here — concurrent
+			// goroutines (reconcileOneAccount) may read the same entry.
+			// FetchedAt is stamped at Store time; if it's empty (legacy entry),
+			// the panel can derive it from prev.fetched if needed.
 			return prev.plan, prev.checkin, prev.credits, nil
 		}
 	}
