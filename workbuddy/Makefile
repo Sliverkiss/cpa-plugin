@@ -1,5 +1,9 @@
 PLUGIN_ID ?= workbuddy
-VERSION ?= 0.5.0
+# Prefer workbuddy/VERSION so local `make build` matches release/CI.
+VERSION ?= $(shell tr -d ' \n\r' < VERSION 2>/dev/null)
+ifeq ($(strip $(VERSION)),)
+VERSION := 0.6.0
+endif
 GO ?= go
 # Ensure go is on PATH for both parse-time $(shell) calls and recipes.
 ifeq ($(shell command -v $(GO) 2>/dev/null),)
