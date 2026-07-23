@@ -1059,26 +1059,33 @@ func runAutoCheckin() {
 		return
 	}
 	for _, f := range files {
-		sa, err := hostAuthGet(f.AuthIndex)
-		if err != nil {
-			continue
-		}
-		if isGlobalDomain(sa.Auth.Domain) {
-			// Global: never auto-claim trial. Lifecycle handles exhaust→delete.
+		// A-24: only fetch sa when needed (checkin). For lifecycle-only paths,
+		// let reconcileOneAccount do the single hostAuthGetBundle internally.
+		if doCheckin {
+			sa, err := hostAuthGet(f.AuthIndex)
+			if err != nil {
+				continue
+			}
+			if isGlobalDomain(sa.Auth.Domain) {
+				// Global: never check-in or auto-claim trial. Lifecycle only.
+				accountCache.Delete(f.AuthIndex)
+				if lifecycleEnabled() {
+					_, _ = reconcileOneAccount(f.AuthIndex, true)
+				}
+				continue
+			}
+			// CN: daily check-in when enabled.
+			ci, err := fetchCheckinStatus(sa)
+			if err == nil && ci.Active && !ci.TodayCheckedIn {
+				_, _ = performCheckinCall(sa)
+			}
 			accountCache.Delete(f.AuthIndex)
 			if lifecycleEnabled() {
 				_, _ = reconcileOneAccount(f.AuthIndex, true)
 			}
 			continue
 		}
-		// CN: daily check-in when enabled, then lifecycle (reenable/disable).
-		if doCheckin {
-			ci, err := fetchCheckinStatus(sa)
-			if err == nil && ci.Active && !ci.TodayCheckedIn {
-				_, _ = performCheckinCall(sa)
-			}
-		}
-		accountCache.Delete(f.AuthIndex)
+		// Lifecycle-only (checkin off): reconcile handles its own get.
 		if lifecycleEnabled() {
 			_, _ = reconcileOneAccount(f.AuthIndex, true)
 		}
