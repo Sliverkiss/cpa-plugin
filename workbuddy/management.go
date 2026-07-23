@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1336,9 +1335,8 @@ func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
 		if legacyPath != "" {
 			dir := filepath.Dir(legacyPath)
 			legacyFile := filepath.Join(dir, authFileName)
-			if isSafeWorkbuddyAuthPath(legacyFile) {
-				_ = os.Remove(legacyFile)
-			}
+			// A-35: use deleteAuthFileInDir for absolute path + directory confinement.
+			_ = deleteAuthFileInDir(legacyFile, dir)
 		}
 	}
 	return map[string]any{
