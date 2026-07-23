@@ -441,6 +441,13 @@ func packageRemainUsed(a resourcePackage) (remain, used, size int64) {
 	if a.CycleCapacityRemain > 0 || a.CycleCapacityUsed > 0 {
 		remain = a.CycleCapacityRemain
 		used = a.CycleCapacityUsed
+		// A-41: clamp negatives (branch1 already clamps; branch2/3 did not).
+		if remain < 0 {
+			remain = 0
+		}
+		if used < 0 {
+			used = 0
+		}
 		size = remain + used
 		if a.CapacitySize > size {
 			size = a.CapacitySize
@@ -453,10 +460,17 @@ func packageRemainUsed(a resourcePackage) (remain, used, size int64) {
 	remain = a.CapacityRemain
 	used = a.CapacityUsed
 	size = a.CapacitySize
+	// A-41: lifetime branch also clamps negative remain/used.
+	if remain < 0 {
+		remain = 0
+	}
+	if used < 0 {
+		used = 0
+	}
 	if size <= 0 {
 		size = remain + used
 	}
-	if used == 0 && size > remain && remain >= 0 {
+	if used == 0 && size > remain {
 		used = size - remain
 	}
 	return remain, used, size
