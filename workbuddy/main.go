@@ -66,6 +66,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -782,10 +783,27 @@ func publishUsage(requestedModel, upstreamModel, authID string, started time.Tim
 		record.Latency = time.Since(started)
 	}
 	if failed {
-		record.Fail = usage.Failure{StatusCode: statusCode, Body: truncate(errBody, 512)}
+		record.Fail = usage.Failure{StatusCode: statusCode, Body: truncate(redactSecrets(errBody), 512)}
 	}
 	usage.PublishRecord(context.Background(), record)
 }
+
+// redactSecrets strips bearer tokens / JWT-like blobs from error bodies before usage publish.
+func redactSecrets(s string) string {
+	if s == "" {
+		return s
+	}
+	// Bearer tokens
+	s = redactREBearer.ReplaceAllString(s, "Bearer ***")
+	// long JWT-ish segments
+	s = redactREJWT.ReplaceAllString(s, "***jwt***")
+	return s
+}
+
+var (
+	redactREBearer = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._\-+/=]{12,}`)
+	redactREJWT    = regexp.MustCompile(`\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b`)
+)
 
 func normalizeUsageDetail(d usage.Detail) usage.Detail {
 	if d.TotalTokens == 0 {
