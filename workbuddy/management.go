@@ -729,25 +729,29 @@ func buildDashboard(force bool) map[string]any {
 	var life []map[string]any
 	if force && lifecycleEnabled() {
 		life = reconcileAllAccounts(true)
-		// Drop accounts deleted during reconcile (Global exhaust).
-		if len(life) > 0 {
-			// Rebuild list without missing files (best-effort).
-			if files2, err2 := hostAuthList(); err2 == nil {
-				live := make(map[string]struct{}, len(files2))
-				for _, f := range files2 {
-					live[f.AuthIndex] = struct{}{}
-				}
-				filtered := out[:0]
-				for _, a := range out {
-					if _, ok := live[a.AuthIndex]; ok {
-						filtered = append(filtered, a)
-					}
-				}
-				// Preserve capacity if all still present.
-				if len(filtered) != len(out) {
-					out = filtered
+		// Drop accounts deleted during reconcile (Global exhaust) and refresh
+		// disabled flags from disk (host list may lag after save).
+		if files2, err2 := hostAuthList(); err2 == nil {
+			live := make(map[string]struct{}, len(files2))
+			disabledBy := make(map[string]bool, len(files2))
+			for _, f := range files2 {
+				live[f.AuthIndex] = struct{}{}
+				disabledBy[f.AuthIndex] = f.Disabled
+				if phys, perr := hostAuthGetPhysical(f.AuthIndex); perr == nil {
+					disabledBy[f.AuthIndex] = phys.Disabled
 				}
 			}
+			filtered := out[:0]
+			for _, a := range out {
+				if _, ok := live[a.AuthIndex]; !ok {
+					continue
+				}
+				if d, ok := disabledBy[a.AuthIndex]; ok {
+					a.Disabled = d
+				}
+				filtered = append(filtered, a)
+			}
+			out = filtered
 		}
 	}
 	checkinAutoMu.RLock()

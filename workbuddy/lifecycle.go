@@ -323,6 +323,30 @@ func hostAuthSaveJSON(name string, raw []byte) error {
 	return nil
 }
 
+// writeAuthFileIfSafe best-effort overwrites a workbuddy auth path so the host
+// file watcher re-synthesizes Auth.Disabled from metadata.disabled.
+// CPA host.auth.save upsert may leave in-memory Disabled lagging until resync.
+func writeAuthFileIfSafe(path string, raw []byte) error {
+	path = strings.TrimSpace(path)
+	if !isSafeWorkbuddyAuthPath(path) {
+		return nil
+	}
+	if len(raw) == 0 {
+		return fmt.Errorf("empty auth payload")
+	}
+	return os.WriteFile(path, raw, 0o600)
+}
+
+// hostAuthPersist saves via host API and dual-writes the physical path when known.
+func hostAuthPersist(name, path string, raw []byte) error {
+	if err := hostAuthSaveJSON(name, raw); err != nil {
+		return err
+	}
+	// Best-effort: mtime touch for watcher even if content identical.
+	_ = writeAuthFileIfSafe(path, raw)
+	return nil
+}
+
 // lastLifecycleNote avoids redundant saves when note/disabled unchanged.
 var (
 	lifecycleState   sync.Map // auth_index -> lifecycleStateEntry
@@ -376,14 +400,18 @@ func disableAuth(authIndex string, sa *storedAuth, cr *creditsSummary, reason st
 		}
 	}
 	name := authFileNameFor(sa)
-	if phys != nil && strings.TrimSpace(phys.Name) != "" {
-		name = phys.Name
+	path := ""
+	if phys != nil {
+		if strings.TrimSpace(phys.Name) != "" {
+			name = phys.Name
+		}
+		path = strings.TrimSpace(phys.Path)
 	}
 	raw, err := buildAuthFileJSON(sa, true, note, nil)
 	if err != nil {
 		return err
 	}
-	if err := hostAuthSaveJSON(name, raw); err != nil {
+	if err := hostAuthPersist(name, path, raw); err != nil {
 		return err
 	}
 	rememberLifecycleState(authIndex, true, note)
@@ -406,14 +434,18 @@ func reenableAuth(authIndex string, sa *storedAuth, cr *creditsSummary) error {
 	}
 	phys, err := hostAuthGetPhysical(authIndex)
 	name := authFileNameFor(sa)
-	if err == nil && strings.TrimSpace(phys.Name) != "" {
-		name = phys.Name
+	path := ""
+	if err == nil {
+		if strings.TrimSpace(phys.Name) != "" {
+			name = phys.Name
+		}
+		path = strings.TrimSpace(phys.Path)
 	}
 	raw, err := buildAuthFileJSON(sa, false, note, nil)
 	if err != nil {
 		return err
 	}
-	if err := hostAuthSaveJSON(name, raw); err != nil {
+	if err := hostAuthPersist(name, path, raw); err != nil {
 		return err
 	}
 	rememberLifecycleState(authIndex, false, note)
@@ -443,7 +475,12 @@ func deleteAuth(authIndex string, sa *storedAuth) error {
 		if name == "" {
 			name = authFileNameFor(sa)
 		}
-		return hostAuthSaveJSON(name, raw)
+		if err := hostAuthPersist(name, "", raw); err != nil {
+			return err
+		}
+		rememberLifecycleState(authIndex, true, note)
+		accountCache.Delete(authIndex)
+		return nil
 	}
 	if err := deleteAuthFileAt(path); err != nil {
 		return err
@@ -483,19 +520,24 @@ func syncAuthNote(authIndex string, sa *storedAuth, cr *creditsSummary, disabled
 	defer mu.Unlock()
 	phys, err := hostAuthGetPhysical(authIndex)
 	name := authFileNameFor(sa)
+	path := ""
 	if err == nil {
 		if strings.TrimSpace(phys.Name) != "" {
 			name = phys.Name
 		}
+		path = strings.TrimSpace(phys.Path)
 		// re-read disabled from disk as source of truth
 		disabled = parseDisabledFromAuthJSON(phys.JSON)
 		note = displayNote(sa, cr, disabled)
+	}
+	if lifecycleStateUnchanged(authIndex, disabled, note) {
+		return nil
 	}
 	raw, err := buildAuthFileJSON(sa, disabled, note, nil)
 	if err != nil {
 		return err
 	}
-	if err := hostAuthSaveJSON(name, raw); err != nil {
+	if err := hostAuthPersist(name, path, raw); err != nil {
 		return err
 	}
 	rememberLifecycleState(authIndex, disabled, note)
