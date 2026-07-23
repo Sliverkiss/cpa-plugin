@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2
+
+### Changed
+- Panel: credential import is a toolbar button (left of 刷新数据) opening a modal, instead of an always-visible card
+
 ## 0.4.1
 
 ### Added

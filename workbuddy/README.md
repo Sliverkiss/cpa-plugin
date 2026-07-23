@@ -15,7 +15,7 @@ Tencent **CodeBuddy** (`copilot.tencent.com`) provider plugin for [CLIProxyAPI (
 - **Executor**：流/非流 SSE 聚合、cleanChunk、跨协议 framing、alias 反解、tool_choice 归一
 - **Usage 上报**：`usage.PublishRecord` 三出口
 - **签到**：09:00 / 21:00 + 面板手动；多标签 per-account 锁
-- **积分面板**：耗尽角标、进度条、导入凭证 JSON
+- **积分面板**：耗尽角标、进度条、导入凭证按钮（弹窗粘贴 JSON）
 - **Scheduler**（可选）：`scheduler_mode: off|credits`（**默认 off**）
 - **OAuth 别名/排除**：由 CPA 宿主 `oauth-model-alias` / `oauth-excluded-models` 处理
 
@@ -55,7 +55,7 @@ plugins:
 ### 登录 / 凭证
 
 1. CPA 管理端 OAuth 选择 WorkBuddy 完成授权；或  
-2. 面板粘贴凭证 JSON → `POST .../import`  
+2. 面板「导入凭证」弹窗粘贴 JSON → `POST .../import`  
 3. 落盘：`auths/workbuddy-<uid>.json`（多账号不覆盖）
 
 ### 预期模型

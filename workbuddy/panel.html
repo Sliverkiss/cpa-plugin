@@ -46,6 +46,18 @@ button.done:disabled{opacity:1}
 @keyframes sp{to{transform:rotate(360deg)}}
 button .spin{border-color:#fff;border-top-color:transparent}
 .loading{color:var(--mut);text-align:center;padding:40px}
+/* 导入凭证弹窗 */
+.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:9000;padding:16px}
+.modal-mask.show{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);width:min(560px,100%);max-height:min(90vh,640px);display:flex;flex-direction:column;box-shadow:0 20px 48px rgba(0,0,0,.55)}
+.modal-hd{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border)}
+.modal-hd h2{font-size:15px;margin:0}
+.modal-x{background:transparent;color:var(--mut);padding:4px 10px;font-size:18px;line-height:1}
+.modal-x:hover{color:var(--fg)}
+.modal-bd{padding:16px;overflow:auto}
+.modal-bd .hint{color:var(--mut);font-size:12px;margin:0 0 10px;line-height:1.5}
+.modal-bd textarea{width:100%;min-height:160px;background:#0f1115;border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--fg);font:12px/1.45 ui-monospace,monospace;resize:vertical}
+.modal-ft{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--border)}
 </style>
 </head>
 <body>
@@ -60,18 +72,29 @@ button .spin{border-color:#fff;border-top-color:transparent}
     </div>
   </div>
   <div class="bar">
+    <button class="sec" id="importBtn" onclick="openImportModal()">导入凭证</button>
     <button id="refreshBtn" onclick="load(true,this)">刷新数据</button>
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
     <label class="toggle"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到</label>
     <span class="toggle" id="svtime"></span>
   </div>
-  <div class="card" style="margin-bottom:16px">
-    <h2 style="font-size:14px;margin:0 0 8px">导入凭证 JSON</h2>
-    <div class="sub" style="margin:0 0 8px">支持 nested <code>{"auth":{...},"account":{...}}</code> 或 flat <code>{"accessToken":...}</code>。落盘为 <code>workbuddy-&lt;uid&gt;.json</code>。</div>
-    <textarea id="importRaw" rows="4" placeholder='粘贴 WorkBuddy / CodeBuddy 凭证 JSON' style="width:100%;background:#0f1115;border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--fg);font:12px/1.4 ui-monospace,monospace;resize:vertical"></textarea>
-    <div class="actions"><button class="sec" onclick="importAuth(this)">导入并保存</button></div>
-  </div>
   <div id="grid" class="grid"><div class="loading">加载中…</div></div>
+</div>
+<div class="modal-mask" id="importModal" onclick="onImportMaskClick(event)">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
+    <div class="modal-hd">
+      <h2 id="importModalTitle">导入凭证 JSON</h2>
+      <button type="button" class="modal-x" onclick="closeImportModal()" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-bd">
+      <p class="hint">支持 nested <code>{"auth":{...},"account":{...}}</code> 或 flat <code>{"accessToken":...}</code>。落盘为 <code>workbuddy-&lt;uid&gt;.json</code>。</p>
+      <textarea id="importRaw" rows="8" placeholder='粘贴 WorkBuddy / CodeBuddy 凭证 JSON'></textarea>
+    </div>
+    <div class="modal-ft">
+      <button type="button" class="sec" onclick="closeImportModal()">取消</button>
+      <button type="button" onclick="importAuth(this)">导入并保存</button>
+    </div>
+  </div>
 </div>
 <div class="toasts" id="toasts"></div>
 <script>
@@ -253,6 +276,18 @@ async function checkinAll(btn){
 async function toggleAuto(on){
   try{const d=await api("/checkin/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});toast("自动签到已"+(d.checkin_auto?"开启 ✅":"关闭 ⏸"),"ok")}catch(e){toast("设置失败","err",e.message)}
 }
+function openImportModal(){
+  const m=document.getElementById("importModal");
+  m.classList.add("show");
+  const ta=document.getElementById("importRaw");
+  if(ta) setTimeout(()=>ta.focus(),0);
+}
+function closeImportModal(){
+  document.getElementById("importModal").classList.remove("show");
+}
+function onImportMaskClick(e){
+  if(e.target===document.getElementById("importModal")) closeImportModal();
+}
 async function importAuth(btn){
   const raw=(document.getElementById("importRaw").value||"").trim();
   if(!raw){toast("请粘贴凭证 JSON","warn");return}
@@ -264,12 +299,16 @@ async function importAuth(btn){
     if(d.success){
       toast("导入成功","ok",(d.nickname||d.uid||"")+ " → "+(d.file||d.name||""));
       document.getElementById("importRaw").value="";
+      closeImportModal();
       load(true);
     }else toast("导入失败","err",d.error||"unknown");
   }catch(e){toast("导入请求失败","err",e.message)}
   busy(btn,false);
 }
 document.getElementById("keyInput").addEventListener("keydown",e=>{if(e.key==="Enter")saveKey()});
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"&&document.getElementById("importModal").classList.contains("show")) closeImportModal();
+});
 if(!getKey())showAuth();
 load(false);
 </script>
