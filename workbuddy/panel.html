@@ -387,7 +387,15 @@ async function api(path, opts={}){
     let body="";
     try{body=await r.text()}catch(_){}
     if(/IP banned|too many failed/i.test(body)){
-      authFailUntil=Date.now()+60000;
+      // Prefer upstream wait window (e.g. "Try again in 27m10s") when present.
+      let waitMs=60000;
+      const m=body.match(/(\d+)\s*m(?:in(?:ute)?s?)?\s*(\d+)\s*s/i)||body.match(/(\d+)\s*m/i);
+      if(m){
+        const mins=parseInt(m[1],10)||0;
+        const secs=m[2]?parseInt(m[2],10):0;
+        waitMs=Math.min(Math.max((mins*60+secs)*1000, 30000), 30*60*1000);
+      }
+      authFailUntil=Date.now()+waitMs;
       throw new Error(body.trim()||"IP 被封禁，请稍后再试");
     }
     if(authFailCount>=3){
