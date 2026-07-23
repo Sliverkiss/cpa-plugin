@@ -192,12 +192,80 @@ func labelForAuth(sa *storedAuth) string {
 	return base + " [" + tag + "]"
 }
 
-// authFileNameFor matches toAuthData naming.
+// authFileNameFor matches toAuthData naming: always workbuddy-<uid>.json when UID is known.
+// Bare "workbuddy.json" is legacy single-account only (no UID).
 func authFileNameFor(sa *storedAuth) string {
 	if sa != nil && strings.TrimSpace(sa.Account.UID) != "" {
 		return "workbuddy-" + strings.TrimSpace(sa.Account.UID) + ".json"
 	}
 	return authFileName
+}
+
+// isLegacyWorkbuddyAuthName reports the historical single-file name that collides
+// with multi-account workbuddy-<uid>.json for the same credential.
+func isLegacyWorkbuddyAuthName(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), authFileName)
+}
+
+// resolveAuthFileTarget picks the canonical file name + path for save/delete.
+// Prefer workbuddy-<uid>.json; if the host still points at legacy workbuddy.json
+// for a UID-bearing account, rewrite to the uid name and schedule legacy removal.
+func resolveAuthFileTarget(sa *storedAuth, phys *hostAuthPhysical) (name, path string, legacyPath string) {
+	name = authFileNameFor(sa)
+	if phys != nil {
+		path = strings.TrimSpace(phys.Path)
+		physName := strings.TrimSpace(phys.Name)
+		if physName != "" && !isLegacyWorkbuddyAuthName(physName) {
+			// Already on multi-account name — keep host name (should match uid form).
+			name = physName
+		}
+		if isLegacyWorkbuddyAuthName(physName) || isLegacyWorkbuddyAuthName(filepath.Base(path)) {
+			if sa != nil && strings.TrimSpace(sa.Account.UID) != "" {
+				// Migrate: write canonical, delete legacy path after save.
+				legacyPath = path
+				if isLegacyWorkbuddyAuthName(filepath.Base(path)) {
+					// path stays legacy until we write canonical beside it
+				}
+				// After persist to name, remove legacyPath if different.
+			}
+		}
+	}
+	return name, path, legacyPath
+}
+
+// hostAuthPersist saves via host API and dual-writes the physical path when known.
+// When migrating off legacy workbuddy.json, saves to the uid-based name and removes the legacy file.
+func hostAuthPersist(name, path string, raw []byte) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("empty auth file name")
+	}
+	if err := hostAuthSaveJSON(name, raw); err != nil {
+		return err
+	}
+	// Dual-write path only when it already is the same basenamed file (watcher nudge).
+	// Never write raw to a different basename than name — that recreates duplicates.
+	if path != "" && strings.EqualFold(filepath.Base(path), name) {
+		_ = writeAuthFileIfSafe(path, raw)
+	}
+	return nil
+}
+
+// hostAuthPersistMigrate is like hostAuthPersist but also removes a legacy path
+// when the canonical name differs (workbuddy.json → workbuddy-<uid>.json).
+func hostAuthPersistMigrate(name, path, legacyPath string, raw []byte) error {
+	if err := hostAuthPersist(name, path, raw); err != nil {
+		return err
+	}
+	// If path was legacy and name is canonical, also write canonical path next to it.
+	if legacyPath != "" && !strings.EqualFold(filepath.Base(legacyPath), name) {
+		// host.auth.save already wrote name under auth dir; drop legacy file.
+		if isSafeWorkbuddyAuthPath(legacyPath) && isLegacyWorkbuddyAuthName(filepath.Base(legacyPath)) {
+			_ = os.Remove(legacyPath)
+		}
+	}
+	// If path points at legacy but name is uid form, do not dual-write path (would keep legacy alive).
+	return nil
 }
 
 // buildAuthFileJSON produces host-save payload: nested storage + top-level metadata.
@@ -343,16 +411,6 @@ func writeAuthFileIfSafe(path string, raw []byte) error {
 	return os.WriteFile(path, raw, 0o600)
 }
 
-// hostAuthPersist saves via host API and dual-writes the physical path when known.
-func hostAuthPersist(name, path string, raw []byte) error {
-	if err := hostAuthSaveJSON(name, raw); err != nil {
-		return err
-	}
-	// Best-effort: mtime touch for watcher even if content identical.
-	_ = writeAuthFileIfSafe(path, raw)
-	return nil
-}
-
 // lastLifecycleNote avoids redundant saves when note/disabled unchanged.
 var (
 	lifecycleState   sync.Map // auth_index -> lifecycleStateEntry
@@ -407,17 +465,15 @@ func disableAuth(authIndex string, sa *storedAuth, cr *creditsSummary, reason st
 	}
 	name := authFileNameFor(sa)
 	path := ""
+	legacyPath := ""
 	if phys != nil {
-		if strings.TrimSpace(phys.Name) != "" {
-			name = phys.Name
-		}
-		path = strings.TrimSpace(phys.Path)
+		name, path, legacyPath = resolveAuthFileTarget(sa, phys)
 	}
 	raw, err := buildAuthFileJSON(sa, true, note, nil)
 	if err != nil {
 		return err
 	}
-	if err := hostAuthPersist(name, path, raw); err != nil {
+	if err := hostAuthPersistMigrate(name, path, legacyPath, raw); err != nil {
 		return err
 	}
 	rememberLifecycleState(authIndex, true, note)
@@ -441,17 +497,15 @@ func reenableAuth(authIndex string, sa *storedAuth, cr *creditsSummary) error {
 	phys, err := hostAuthGetPhysical(authIndex)
 	name := authFileNameFor(sa)
 	path := ""
+	legacyPath := ""
 	if err == nil {
-		if strings.TrimSpace(phys.Name) != "" {
-			name = phys.Name
-		}
-		path = strings.TrimSpace(phys.Path)
+		name, path, legacyPath = resolveAuthFileTarget(sa, phys)
 	}
 	raw, err := buildAuthFileJSON(sa, false, note, nil)
 	if err != nil {
 		return err
 	}
-	if err := hostAuthPersist(name, path, raw); err != nil {
+	if err := hostAuthPersistMigrate(name, path, legacyPath, raw); err != nil {
 		return err
 	}
 	rememberLifecycleState(authIndex, false, note)
@@ -477,11 +531,11 @@ func deleteAuth(authIndex string, sa *storedAuth) error {
 		if berr != nil {
 			return fmt.Errorf("no path and build failed: %w", berr)
 		}
-		name := phys.Name
-		if name == "" {
-			name = authFileNameFor(sa)
+		name := authFileNameFor(sa)
+		if phys.Name != "" && !isLegacyWorkbuddyAuthName(phys.Name) {
+			name = phys.Name
 		}
-		if err := hostAuthPersist(name, "", raw); err != nil {
+		if err := hostAuthPersistMigrate(name, "", "", raw); err != nil {
 			return err
 		}
 		rememberLifecycleState(authIndex, true, note)
@@ -527,11 +581,9 @@ func syncAuthNote(authIndex string, sa *storedAuth, cr *creditsSummary, disabled
 	phys, err := hostAuthGetPhysical(authIndex)
 	name := authFileNameFor(sa)
 	path := ""
+	legacyPath := ""
 	if err == nil {
-		if strings.TrimSpace(phys.Name) != "" {
-			name = phys.Name
-		}
-		path = strings.TrimSpace(phys.Path)
+		name, path, legacyPath = resolveAuthFileTarget(sa, phys)
 		// re-read disabled from disk as source of truth
 		disabled = parseDisabledFromAuthJSON(phys.JSON)
 		note = displayNote(sa, cr, disabled)
@@ -543,7 +595,7 @@ func syncAuthNote(authIndex string, sa *storedAuth, cr *creditsSummary, disabled
 	if err != nil {
 		return err
 	}
-	if err := hostAuthPersist(name, path, raw); err != nil {
+	if err := hostAuthPersistMigrate(name, path, legacyPath, raw); err != nil {
 		return err
 	}
 	rememberLifecycleState(authIndex, disabled, note)

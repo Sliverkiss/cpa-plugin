@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -1208,6 +1210,18 @@ func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
 	}
 	var saveResp pluginapi.HostAuthSaveResponse
 	_ = json.Unmarshal(env.Result, &saveResp)
+	// Remove legacy workbuddy.json if it exists and differs from the saved name.
+	if saveResp.Name != "" && !strings.EqualFold(saveResp.Name, authFileName) {
+		legacyPath := strings.TrimSpace(saveResp.Path)
+		// Best-effort: if auth dir is known via saveResp.Path parent, try removing sibling workbuddy.json.
+		if legacyPath != "" {
+			dir := filepath.Dir(legacyPath)
+			legacyFile := filepath.Join(dir, authFileName)
+			if isSafeWorkbuddyAuthPath(legacyFile) {
+				_ = os.Remove(legacyFile)
+			}
+		}
+	}
 	return map[string]any{
 		"success":  true,
 		"name":     saveResp.Name,
