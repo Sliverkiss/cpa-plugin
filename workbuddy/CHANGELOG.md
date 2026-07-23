@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.3
+
+### Fixed
+- Auth identity: parse/refresh leave ID empty; regression tests (A-01)
+- Stream pump: emit failure is failed usage; defer streamClose (A-06)
+- No dual-write after host.auth.save (A-15)
+- Scheduler skips host-disabled candidates (A-04)
+- Global delete reconstructs path via peer auth dir (A-07)
+- Panel IP ban wait parses upstream window (A-08)
+- accountCache concurrent errs race + soft cap (A-02)
+- Dashboard single host.auth.get per row (A-05)
+- Instant check-in/trial button state (panel)
+
+
 ## 0.6.2
 
 ### Fixed
