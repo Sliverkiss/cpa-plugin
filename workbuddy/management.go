@@ -674,8 +674,8 @@ func jsonStr(m map[string]any, keys ...string) string {
 // Dashboard assembly + caches
 // -----------------------------------------------------------------------------
 
-// accountCache caches per-account checkin/credits/plan results for 5 minutes.
-// Entry doubles as last-known-good snapshot: when a refresh partially fails,
+// accountCache caches per-account checkin/credits/plan results for accountCacheTTL
+// (45s). Entry doubles as last-known-good snapshot: when a refresh partially fails,
 // the failed field falls back to the previous value instead of being wiped.
 type accountCacheEntry struct {
 	checkin *checkinSummary
