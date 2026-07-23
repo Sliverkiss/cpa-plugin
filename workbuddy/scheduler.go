@@ -57,7 +57,7 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
 
-	// Collect workbuddy candidates only.
+	// Collect workbuddy candidates only; skip exhausted accounts when alternatives exist.
 	var wbCandidates []pluginapi.SchedulerAuthCandidate
 	for _, c := range req.Candidates {
 		if c.Provider == providerName {
@@ -68,17 +68,7 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
 
-	// Single candidate — pick it directly.
-	if len(wbCandidates) == 1 {
-		return okEnvelope(pluginapi.SchedulerPickResponse{
-			AuthID:  wbCandidates[0].ID,
-			Handled: true,
-		})
-	}
-
-	// credits mode: pick the candidate with the highest cached TotalRemain.
-	// Exhausted accounts (remain=0 with known packages/used) sink to the bottom
-	// but are still selectable if every account is exhausted.
+	// Prefer non-exhausted; if all exhausted still pick one (host may disable later).
 	if mode == schedulerModeCredits {
 		type scored struct {
 			candidate pluginapi.SchedulerAuthCandidate
@@ -96,8 +86,17 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 			}
 			return items[i].remain > items[j].remain
 		})
+		// If top is exhausted but a non-exhausted exists, sort already handled it.
 		return okEnvelope(pluginapi.SchedulerPickResponse{
 			AuthID:  items[0].candidate.ID,
+			Handled: true,
+		})
+	}
+
+	// Single candidate or unknown mode handling:
+	if len(wbCandidates) == 1 {
+		return okEnvelope(pluginapi.SchedulerPickResponse{
+			AuthID:  wbCandidates[0].ID,
 			Handled: true,
 		})
 	}
