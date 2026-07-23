@@ -8,10 +8,15 @@ func TestIsGlobalDomain(t *testing.T) {
 		want   bool
 	}{
 		{"www.workbuddy.ai", true},
+		{"workbuddy.ai", true},
 		{"www.codebuddy.cn", false},
 		{"", false},
 		{"WORKBUDDY.AI", true},
 		{"  www.workbuddy.ai  ", true},
+		// A-33: substring match was too loose
+		{"evilworkbuddy.ai", false},
+		{"workbuddy.ai.evil.com", false},
+		{"notworkbuddy.ai", false},
 	}
 	for _, tc := range cases {
 		if got := isGlobalDomain(tc.domain); got != tc.want {

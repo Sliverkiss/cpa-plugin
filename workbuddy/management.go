@@ -47,7 +47,7 @@ func setBillingBaseGlobal(s string) func() {
 // www.codebuddy.cn; Global uses www.workbuddy.ai.
 func isGlobalDomain(domain string) bool {
 	d := strings.ToLower(strings.TrimSpace(domain))
-	return strings.Contains(d, "workbuddy.ai")
+	return d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai")
 }
 
 // accountRegion returns "cn" or "global" based on the auth's domain field.
