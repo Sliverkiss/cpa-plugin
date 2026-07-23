@@ -83,6 +83,35 @@ func TestHasTrialPack_NotFound(t *testing.T) {
 	}
 }
 
+// TestHasTrialPack_CNPersonalExperienceNotTrial locks the live CN free-tier
+// package name "CodeBuddy个人体验版" / bare "体验版". Matching bare "体验" would
+// falsely mark every CN account as trial_claimed (A-18).
+func TestHasTrialPack_CNPersonalExperienceNotTrial(t *testing.T) {
+	cases := []string{
+		"CodeBuddy个人体验版",
+		"体验版",
+		"CodeBuddy个人版国内运营裂变包",
+	}
+	for _, name := range cases {
+		cr := &creditsSummary{Packages: []packageSummary{{Name: name, Remain: 500, Used: 0}}}
+		if hasTrialPack(cr) {
+			t.Errorf("hasTrialPack(%q)=true, want false (CN free tier / fission, not Global expert trial)", name)
+		}
+	}
+}
+
+// TestHasTrialPack_GlobalProPlanTrial is the live Global one-shot pack shape.
+func TestHasTrialPack_GlobalProPlanTrial(t *testing.T) {
+	cr := &creditsSummary{
+		Packages: []packageSummary{
+			{Name: "CodeBuddy One-time Free 2-Week Pro Plan Trial", Remain: 250, Used: 0},
+		},
+	}
+	if !hasTrialPack(cr) {
+		t.Error("expected hasTrialPack=true for Global Pro Plan Trial pack")
+	}
+}
+
 // TestHasTrialPack_Nil tests nil safety.
 func TestHasTrialPack_Nil(t *testing.T) {
 	if hasTrialPack(nil) {

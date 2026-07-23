@@ -596,15 +596,31 @@ func performTrialCall(sa *storedAuth) (map[string]any, error) {
 }
 
 // hasTrialPack reports whether the credits summary already contains the
-// expert trial pack (one-time, 14-day, 250 credits).  Used to decide whether
-// to offer the "claim trial" button / auto-claim.
+// Global expert trial pack (one-time, 14-day, 250 credits). Used for the
+// panel "claim trial" button state (trial_claimed).
+//
+// Do NOT match bare Chinese "体验": CN free-tier is literally named
+// "CodeBuddy个人体验版" / "体验版" and must remain unclaimed-looking for Global
+// trial UI (A-18). Prefer English trial markers from live Global packs.
 func hasTrialPack(cr *creditsSummary) bool {
 	if cr == nil {
 		return false
 	}
 	for _, p := range cr.Packages {
-		name := strings.ToLower(p.Name)
-		if strings.Contains(name, "trial") || strings.Contains(name, "体验") || strings.Contains(name, "pro plan") {
+		name := strings.ToLower(strings.TrimSpace(p.Name))
+		if name == "" {
+			continue
+		}
+		// Live Global: "CodeBuddy One-time Free 2-Week Pro Plan Trial"
+		if strings.Contains(name, "trial") {
+			return true
+		}
+		// Alternate English shapes (keep without bare "体验")
+		if strings.Contains(name, "pro plan") && (strings.Contains(name, "free") || strings.Contains(name, "one-time") || strings.Contains(name, "2-week") || strings.Contains(name, "2 week")) {
+			return true
+		}
+		// Explicit expert-pack Chinese labels only — never bare 体验/体验版.
+		if strings.Contains(name, "专家加油") || strings.Contains(name, "专家体验包") {
 			return true
 		}
 	}
