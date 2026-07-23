@@ -1144,9 +1144,16 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 		// Not a workbuddy credential; let the host try other providers.
 		return okEnvelope(pluginapi.AuthParseResponse{Handled: false})
 	}
+	// CRITICAL: echo back the host-provided FileName (filepath.Base of the on-disk
+	// file). If we override it with "workbuddy-<uid>.json" while the file on disk
+	// is "workbuddy.json" (legacy), CPA computes a different auth ID → duplicate.
+	ad := toAuthDataOpts(sa, nil, false)
+	if fn := strings.TrimSpace(req.FileName); fn != "" {
+		ad.FileName = fn
+	}
 	return okEnvelope(pluginapi.AuthParseResponse{
 		Handled: true,
-		Auth:    toAuthData(sa),
+		Auth:    ad,
 	})
 }
 
@@ -1286,6 +1293,21 @@ func preserveExpiry(newExpiry, oldExpiry int64) int64 {
 	return oldExpiry
 }
 
+// toAuthDataForRefresh returns AuthData with FileName left EMPTY so the CPA
+// host backfills the original auth.FileName (auth_provider.go:371).
+//
+// CPA uses FileName (relative to auth dir) as auth ID. If we set it to
+// "workbuddy-<uid>.json" while the original file was "workbuddy.json"
+// (legacy single-account name), the host treats it as a rename, writes a
+// NEW file, and the old one stays → duplicate auth records.
+//
+// Returning empty FileName = "keep what you had" → no rename, no dup.
+func toAuthDataForRefresh(sa *storedAuth) pluginapi.AuthData {
+	ad := toAuthDataOpts(sa, nil, false)
+	ad.FileName = "" // let host backfill original
+	return ad
+}
+
 func handleRefreshAuth(raw []byte) ([]byte, error) {
 	var req pluginapi.AuthRefreshRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -1329,7 +1351,7 @@ func handleRefreshAuth(raw []byte) ([]byte, error) {
 	// refreshed credential itself after Refresh returns (conductor.go
 	// refreshAuth → m.Update → persist). Writing from the plugin too would
 	// double-write the file.
-	return okEnvelope(pluginapi.AuthRefreshResponse{Auth: toAuthData(sa)})
+	return okEnvelope(pluginapi.AuthRefreshResponse{Auth: toAuthDataForRefresh(sa)})
 }
 
 // -----------------------------------------------------------------------------
