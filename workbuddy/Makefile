@@ -1,5 +1,5 @@
 PLUGIN_ID ?= workbuddy
-VERSION ?= 0.4.2
+VERSION ?= 0.4.3
 GO ?= go
 # Ensure go is on PATH for both parse-time $(shell) calls and recipes.
 ifeq ($(shell command -v $(GO) 2>/dev/null),)

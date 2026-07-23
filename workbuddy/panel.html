@@ -46,18 +46,23 @@ button.done:disabled{opacity:1}
 @keyframes sp{to{transform:rotate(360deg)}}
 button .spin{border-color:#fff;border-top-color:transparent}
 .loading{color:var(--mut);text-align:center;padding:40px}
-/* 导入凭证弹窗 */
-.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:9000;padding:16px}
+/* 导入凭证弹窗：白底深字，贴合卡片圆角/主色，保证可读 */
+.modal-mask{position:fixed;inset:0;background:rgba(15,17,21,.62);display:none;align-items:center;justify-content:center;z-index:9000;padding:16px;backdrop-filter:blur(2px)}
 .modal-mask.show{display:flex}
-.modal{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);width:min(560px,100%);max-height:min(90vh,640px);display:flex;flex-direction:column;box-shadow:0 20px 48px rgba(0,0,0,.55)}
-.modal-hd{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border)}
-.modal-hd h2{font-size:15px;margin:0}
-.modal-x{background:transparent;color:var(--mut);padding:4px 10px;font-size:18px;line-height:1}
-.modal-x:hover{color:var(--fg)}
+.modal{background:#fff;color:#1a1d24;border:1px solid #e6e8ec;border-radius:var(--radius-lg);width:min(560px,100%);max-height:min(90vh,640px);display:flex;flex-direction:column;box-shadow:0 24px 56px rgba(0,0,0,.35),0 0 0 1px rgba(255,255,255,.06)}
+.modal-hd{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #eceef2}
+.modal-hd h2{font-size:15px;margin:0;color:#1a1d24;font-weight:600}
+.modal-x{background:transparent;color:#6b7280;padding:4px 10px;font-size:18px;line-height:1}
+.modal-x:hover{color:#1a1d24;background:#f3f4f6}
 .modal-bd{padding:16px;overflow:auto}
-.modal-bd .hint{color:var(--mut);font-size:12px;margin:0 0 10px;line-height:1.5}
-.modal-bd textarea{width:100%;min-height:160px;background:#0f1115;border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--fg);font:12px/1.45 ui-monospace,monospace;resize:vertical}
-.modal-ft{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--border)}
+.modal-bd .hint{color:#6b7280;font-size:12px;margin:0 0 10px;line-height:1.5}
+.modal-bd .hint code{background:#f3f4f6;color:#374151;padding:1px 5px;border-radius:4px;font-size:11px}
+.modal-bd textarea{width:100%;min-height:160px;background:#f8fafc;border:1px solid #d1d5db;border-radius:8px;padding:10px 12px;color:#111827;font:12px/1.45 ui-monospace,monospace;resize:vertical;outline:none}
+.modal-bd textarea:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(76,141,255,.18)}
+.modal-bd textarea::placeholder{color:#9ca3af}
+.modal-ft{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid #eceef2;background:#fafbfc;border-radius:0 0 var(--radius-lg) var(--radius-lg)}
+.modal-ft button.sec{background:#eef1f6;color:#1a1d24}
+.modal-ft button.sec:hover{background:#e4e8ef}
 </style>
 </head>
 <body>

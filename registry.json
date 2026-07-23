@@ -6,7 +6,7 @@
       "name": "WorkBuddy",
       "description": "Tencent CodeBuddy (WorkBuddy) OAuth provider for CLIProxyAPI: multi-account login, dynamic models, chat executor, daily check-in, credits panel, optional credits-aware scheduler.",
       "author": "Sliverkiss",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "repository": "https://github.com/Sliverkiss/cpa-plugin",
       "logo": "https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png",
       "homepage": "https://github.com/Sliverkiss/cpa-plugin/tree/main/workbuddy",

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.3
+
+### Changed
+- Panel import modal: white surface + dark text for readable contrast (was dark-on-dark)
+
 ## 0.4.2
 
 ### Changed
