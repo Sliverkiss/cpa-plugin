@@ -144,9 +144,15 @@ type wbAccount struct {
 }
 
 type creditsSummary struct {
-	TotalRemain int64            `json:"total_remain"`
-	TotalUsed   int64            `json:"total_used"`
-	Packages    []packageSummary `json:"packages"`
+	// TotalRemain is currently usable credits across all active packages.
+	TotalRemain int64 `json:"total_remain"`
+	// TotalUsed is consumed credits in the current cycle (sum of packages).
+	TotalUsed int64 `json:"total_used"`
+	// TotalSize is the credit capacity/pool (sum of package sizes). remain+used ≈ size.
+	TotalSize int64 `json:"total_size"`
+	// PackCount is number of resource packages included in the aggregate.
+	PackCount int              `json:"pack_count"`
+	Packages  []packageSummary `json:"packages"`
 }
 
 // isCreditsExhausted is the shared "耗尽" definition for panel + scheduler.
@@ -160,8 +166,8 @@ func isCreditsExhausted(cr *creditsSummary) bool {
 		return false
 	}
 	// remain==0: exhausted only when we know there was/is a package total
-	// (used>0, or packages present). Pure zero with no packages = no data.
-	if cr.TotalUsed > 0 {
+	// (used>0, size>0, or packages present). Pure zero with no packages = no data.
+	if cr.TotalUsed > 0 || cr.TotalSize > 0 {
 		return true
 	}
 	return len(cr.Packages) > 0
@@ -171,6 +177,7 @@ type packageSummary struct {
 	Name       string `json:"name"`
 	Remain     int64  `json:"remain"`
 	Used       int64  `json:"used"`
+	Size       int64  `json:"size"`
 	CycleStart string `json:"cycle_start"`
 	CycleEnd   string `json:"cycle_end"`
 }
@@ -393,34 +400,56 @@ type resourcePackage struct {
 	CycleEndTime        string `json:"CycleEndTime"`
 }
 
-// packageRemainUsed picks current-cycle remain/used for one package.
-// Prefer cycle metrics whenever CycleCapacitySize is present; compute used as
-// size−remain so missing CycleCapacityUsed never under-reports consumption.
+// packageRemainUsed picks current-cycle remain/used/size for one package.
+// Prefer cycle metrics whenever CycleCapacitySize is present; used = size−remain
+// so missing CycleCapacityUsed never under-reports consumption.
 // Fall back to lifetime Capacity* only when cycle fields are absent entirely.
-func packageRemainUsed(a resourcePackage) (remain, used int64) {
+//
+// Daily check-in adds NEW packages (size grows) — capacity grant, not negative
+// consumption. Track consumption via used (size−remain), not via remain alone.
+func packageRemainUsed(a resourcePackage) (remain, used, size int64) {
 	if a.CycleCapacitySize > 0 {
 		remain = a.CycleCapacityRemain
-		used = a.CycleCapacitySize - a.CycleCapacityRemain
-		if used < 0 {
-			used = 0
+		size = a.CycleCapacitySize
+		if remain < 0 {
+			remain = 0
 		}
-		// Prefer explicit CycleCapacityUsed when it is larger (defensive).
+		if remain > size {
+			remain = size
+		}
+		used = size - remain
+		// If upstream reports a higher explicit used, trust the larger figure.
 		if a.CycleCapacityUsed > used {
 			used = a.CycleCapacityUsed
+			// Keep remain consistent when possible.
+			if size >= used {
+				remain = size - used
+			}
 		}
-		return remain, used
+		return remain, used, size
 	}
 	if a.CycleCapacityRemain > 0 || a.CycleCapacityUsed > 0 {
 		remain = a.CycleCapacityRemain
 		used = a.CycleCapacityUsed
-		return remain, used
+		size = remain + used
+		if a.CapacitySize > size {
+			size = a.CapacitySize
+			if size >= remain {
+				used = size - remain
+			}
+		}
+		return remain, used, size
 	}
 	remain = a.CapacityRemain
 	used = a.CapacityUsed
-	if used == 0 && a.CapacitySize > remain && remain >= 0 {
-		used = a.CapacitySize - remain
+	size = a.CapacitySize
+	if size <= 0 {
+		size = remain + used
 	}
-	return remain, used
+	if used == 0 && size > remain && remain >= 0 {
+		used = size - remain
+	}
+	return remain, used, size
 }
 
 func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
@@ -444,31 +473,57 @@ func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
 	var resp struct {
 		Response struct {
 			Data struct {
-				TotalCount int64             `json:"TotalCount"`
-				Accounts   []resourcePackage `json:"Accounts"`
+				TotalCount  int64             `json:"TotalCount"`
+				TotalDosage int64             `json:"TotalDosage"` // package capacity pool, NOT consumption
+				Accounts    []resourcePackage `json:"Accounts"`
 			} `json:"Data"`
 		} `json:"Response"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
-	// Aggregate ALL packages (体验版 + 多个裂变包 + 其它赠送包) into one
-	// account-level remain/used total. Per-package rows are kept for the panel.
+	// Aggregate ALL packages (体验版 + 多个签到/裂变包 + 其它赠送包).
+	// Remain = currently spendable. Used = consumed this cycle. Size = capacity.
+	// Daily check-in adds packages → Size and Remain go UP; that is grant, not usage.
 	sum := &creditsSummary{}
 	for _, a := range resp.Response.Data.Accounts {
-		remain, used := packageRemainUsed(a)
+		remain, used, size := packageRemainUsed(a)
 		sum.TotalRemain += remain
 		sum.TotalUsed += used
+		sum.TotalSize += size
 		sum.Packages = append(sum.Packages, packageSummary{
 			Name:       a.PackageName,
 			Remain:     remain,
 			Used:       used,
+			Size:       size,
 			CycleStart: a.CycleStartTime,
 			CycleEnd:   a.CycleEndTime,
 		})
 	}
-	// Soft note: if TotalCount > returned rows, pagination would be needed.
-	// Current free accounts have 3–4 packs; pageSize=100 is ample.
+	sum.PackCount = len(sum.Packages)
+	// Reconcile used with size-remain so UI totals always add up when size known.
+	if sum.TotalSize > 0 {
+		derived := sum.TotalSize - sum.TotalRemain
+		if derived < 0 {
+			derived = 0
+		}
+		// Prefer the larger of reported-used vs size-remain (never under-report spend).
+		if derived > sum.TotalUsed {
+			sum.TotalUsed = derived
+		}
+	}
+	// Upstream TotalDosage is the capacity pool (~sum of package sizes), not spend.
+	// Use it only as a size floor when pack sizes look incomplete.
+	if dosage := resp.Response.Data.TotalDosage; dosage > sum.TotalSize {
+		sum.TotalSize = dosage
+		derived := sum.TotalSize - sum.TotalRemain
+		if derived < 0 {
+			derived = 0
+		}
+		if derived > sum.TotalUsed {
+			sum.TotalUsed = derived
+		}
+	}
 	_ = resp.Response.Data.TotalCount
 	return sum, nil
 }
@@ -604,7 +659,7 @@ type accountCacheEntry struct {
 
 var (
 	accountCache    sync.Map // auth_index -> *accountCacheEntry
-	accountCacheTTL = 5 * time.Minute
+	accountCacheTTL = 45 * time.Second
 )
 
 // cachedAccountDetails fetches plan/checkin/credits concurrently (upstream
@@ -790,8 +845,8 @@ func buildDashboard(force bool) map[string]any {
 
 // summarizeCredits aggregates remain/used across dashboard accounts.
 func summarizeCredits(accounts []wbAccount) map[string]any {
-	var remain, used, cnRemain, cnUsed, glRemain, glUsed int64
-	var known, disabledN, exhaustedN int
+	var remain, used, size, cnRemain, cnUsed, cnSize, glRemain, glUsed, glSize int64
+	var known, disabledN, exhaustedN, packs int
 	for _, a := range accounts {
 		if a.Disabled {
 			disabledN++
@@ -803,32 +858,44 @@ func summarizeCredits(accounts []wbAccount) map[string]any {
 			continue
 		}
 		cr := a.Credits
-		if cr.TotalRemain == 0 && cr.TotalUsed == 0 && len(cr.Packages) == 0 {
+		if cr.TotalRemain == 0 && cr.TotalUsed == 0 && cr.TotalSize == 0 && len(cr.Packages) == 0 {
 			continue
 		}
 		known++
 		remain += cr.TotalRemain
 		used += cr.TotalUsed
+		size += cr.TotalSize
+		packs += cr.PackCount
 		if a.Region == "global" {
 			glRemain += cr.TotalRemain
 			glUsed += cr.TotalUsed
+			glSize += cr.TotalSize
 		} else {
 			cnRemain += cr.TotalRemain
 			cnUsed += cr.TotalUsed
+			cnSize += cr.TotalSize
 		}
+	}
+	total := remain + used
+	if size > total {
+		total = size
 	}
 	return map[string]any{
 		"account_count":   len(accounts),
 		"known_count":     known,
 		"disabled_count":  disabledN,
 		"exhausted_count": exhaustedN,
+		"pack_count":      packs,
 		"total_remain":    remain,
 		"total_used":      used,
-		"total":           remain + used,
+		"total_size":      size,
+		"total":           total,
 		"cn_remain":       cnRemain,
 		"cn_used":         cnUsed,
+		"cn_size":         cnSize,
 		"global_remain":   glRemain,
 		"global_used":     glUsed,
+		"global_size":     glSize,
 	}
 }
 
