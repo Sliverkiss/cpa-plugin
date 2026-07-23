@@ -202,11 +202,15 @@ function busy(btn, on){
 function fmtRemain(c){if(!c)return "-";const t=(c.total_remain||0)+(c.total_used||0);return c.total_remain+" 余 / "+t+" 总"}
 function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 function progressHTML(c){
-  // total=0 only when both remain and used are missing/zero (no packages).
-  if(!c||(!(c.total_remain||0)&&!(c.total_used||0)))return '<div class="pb"><div class="pb-label"><span>用量进度</span><span>-</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
-  const remain=c.total_remain||0, used=c.total_used||0, total=remain+used, pct=total>0?Math.round(used/total*100):0;
+  // total uses size when known; remain = spendable, used = cycle spend.
+  // Check-in adds packs → size/remain go UP (grant). Chat spend → used goes UP, remain DOWN.
+  if(!c||(!(c.total_remain||0)&&!(c.total_used||0)&&!(c.total_size||0)))return '<div class="pb"><div class="pb-label"><span>可用积分</span><span>-</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
+  const remain=c.total_remain||0, used=c.total_used||0;
+  const size=c.total_size||(remain+used);
+  const total=size>0?size:(remain+used);
+  const pct=total>0?Math.round(used/total*100):0;
   let color='var(--ok)'; if(pct>60)color='var(--warn)'; if(pct>85)color='var(--err)';
-  return `<div class="pb"><div class="pb-label"><span>用量进度</span><span>${pct}%</span></div><div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${color}"></div></div><div class="pb-meta">剩余 ${remain} · 已用 ${used} · 总量 ${total}</div></div>`;
+  return `<div class="pb"><div class="pb-label"><span>可用 ${remain}</span><span>已用 ${used} · ${pct}%</span></div><div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${color}"></div></div><div class="pb-meta">剩余 ${remain} · 已用 ${used} · 额度池 ${total}${c.pack_count?` · ${c.pack_count} 个包`:''}</div></div>`;
 }
 function card(a){
   const plan=(a.plan||"unknown").toLowerCase();
@@ -278,12 +282,13 @@ function accountsForFilter(accounts){
 }
 function creditOf(a){
   const cr=a&&a.credits;
-  if(!cr) return {remain:0, used:0, known:false};
+  if(!cr) return {remain:0, used:0, size:0, known:false};
   const remain=Number(cr.total_remain)||0;
   const used=Number(cr.total_used)||0;
-  // known if we have any usage signal or packages
-  const known=remain>0||used>0||(Array.isArray(cr.packages)&&cr.packages.length>0);
-  return {remain, used, known};
+  const size=Number(cr.total_size)||0;
+  // known if we have any usage signal, size, or packages
+  const known=remain>0||used>0||size>0||(Array.isArray(cr.packages)&&cr.packages.length>0);
+  return {remain, used, size, known};
 }
 function renderSummary(accounts){
   const box=document.getElementById("summaryBox");
@@ -295,49 +300,48 @@ function renderSummary(accounts){
     return;
   }
   const scoped=accountsForFilter(all);
-  let remain=0, used=0, knownN=0, disabledN=0, exhaustedN=0;
+  let remain=0, used=0, size=0, knownN=0, disabledN=0, exhaustedN=0;
   let cnRemain=0, cnUsed=0, glRemain=0, glUsed=0;
   scoped.forEach(a=>{
     const c=creditOf(a);
-    if(c.known){ remain+=c.remain; used+=c.used; knownN++; }
+    if(c.known){ remain+=c.remain; used+=c.used; size+=c.size; knownN++; }
     if(a.disabled) disabledN++;
-    if(a.exhausted||(c.known&&c.remain===0&&c.used>0)) exhaustedN++;
+    if(a.exhausted||(c.known&&c.remain===0&&(c.used>0||c.size>0))) exhaustedN++;
   });
-  // Always also compute full-pool totals for context when filtered
-  let allRemain=0, allUsed=0;
+  let allRemain=0, allUsed=0, allSize=0;
   all.forEach(a=>{
     const c=creditOf(a);
     if(!c.known) return;
-    allRemain+=c.remain; allUsed+=c.used;
+    allRemain+=c.remain; allUsed+=c.used; allSize+=c.size;
     if((a.region||"cn")==="global"){ glRemain+=c.remain; glUsed+=c.used; }
     else { cnRemain+=c.remain; cnUsed+=c.used; }
   });
-  const total=remain+used;
+  const total=size>0?size:(remain+used);
   const pct=total>0?Math.round(used/total*100):0;
   let barColor="var(--ok)"; if(pct>60)barColor="var(--warn)"; if(pct>85)barColor="var(--err)";
   const scopeLabel=currentFilter==="all"?"全部账号":(currentFilter==="global"?"Global 账号":"CN 账号");
-  const allTotal=allRemain+allUsed;
+  const allTotal=allSize>0?allSize:(allRemain+allUsed);
   box.style.display="block";
   box.innerHTML=`
     <div class="summary-hd">
       <div class="summary-title">用量汇总 · ${esc(scopeLabel)}</div>
-      <div class="summary-meta">${scoped.length} 个账号 · 有积分数据 ${knownN} · 禁用 ${disabledN} · 耗尽 ${exhaustedN}</div>
+      <div class="summary-meta">${scoped.length} 个账号 · 有数据 ${knownN} · 禁用 ${disabledN} · 耗尽 ${exhaustedN}</div>
     </div>
     <div class="summary-grid">
-      <div class="summary-item"><div class="k">剩余积分</div><div class="v ok">${remain}</div></div>
-      <div class="summary-item"><div class="k">已用积分</div><div class="v ${pct>85?"err":(pct>60?"warn":"")}">${used}</div></div>
-      <div class="summary-item"><div class="k">总量</div><div class="v">${total||"-"}</div></div>
-      <div class="summary-item"><div class="k">已用占比</div><div class="v ${pct>85?"err":(pct>60?"warn":"ok")}">${total?pct+"%":"-"}</div></div>
+      <div class="summary-item"><div class="k">剩余(可用)</div><div class="v ok">${remain}</div></div>
+      <div class="summary-item"><div class="k">已用(消耗)</div><div class="v ${pct>85?"err":(pct>60?"warn":"")}">${used}</div></div>
+      <div class="summary-item"><div class="k">额度池</div><div class="v">${total||"-"}</div></div>
+      <div class="summary-item"><div class="k">消耗占比</div><div class="v ${pct>85?"err":(pct>60?"warn":"ok")}">${total?pct+"%":"-"}</div></div>
     </div>
     <div class="pb">
-      <div class="pb-label"><span>筛选范围进度</span><span>${total?pct+"%":"-"}</span></div>
+      <div class="pb-label"><span>消耗进度（已用/额度池）</span><span>${total?pct+"%":"-"}</span></div>
       <div class="pb-track"><div class="pb-bar" style="width:${total?pct:0}%;background:${barColor}"></div></div>
-      <div class="pb-meta">剩余 ${remain} · 已用 ${used} · 总量 ${total||0}</div>
+      <div class="pb-meta">可用 ${remain} · 已用 ${used} · 池 ${total||0}（签到加包会抬高池和可用，不等于没消耗）</div>
     </div>
     ${currentFilter==="all"?`
-    <div class="pb-meta" style="margin-top:10px">分区域：CN 余 ${cnRemain} / 已用 ${cnUsed} · Global 余 ${glRemain} / 已用 ${glUsed}</div>
+    <div class="pb-meta" style="margin-top:10px">分区域：CN 可用 ${cnRemain} / 已用 ${cnUsed} · Global 可用 ${glRemain} / 已用 ${glUsed}</div>
     `:`
-    <div class="pb-meta" style="margin-top:10px">全部账号池：余 ${allRemain} · 已用 ${allUsed} · 总量 ${allTotal||0}</div>
+    <div class="pb-meta" style="margin-top:10px">全部账号池：可用 ${allRemain} · 已用 ${allUsed} · 池 ${allTotal||0}</div>
     `}
   `;
 }
