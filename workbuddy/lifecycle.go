@@ -405,7 +405,7 @@ func writeAuthFileIfSafe(path string, raw []byte) error {
 	return os.WriteFile(path, raw, 0o600)
 }
 
-// lastLifecycleNote avoids redundant saves when note/disabled unchanged.
+// lifecycleStateUnchanged avoids redundant saves when note/disabled unchanged.
 var (
 	lifecycleState   sync.Map // auth_index -> lifecycleStateEntry
 	lifecycleSaveTTL = 30 * time.Second
@@ -431,6 +431,30 @@ func lifecycleStateUnchanged(authIndex string, disabled bool, note string) bool 
 
 func rememberLifecycleState(authIndex string, disabled bool, note string) {
 	lifecycleState.Store(authIndex, &lifecycleStateEntry{disabled: disabled, note: note, at: time.Now()})
+}
+
+// pruneLifecycleState removes entries for auth indices that no longer exist
+// or whose TTL has expired. Called from dashboard prune to prevent unbounded growth.
+func pruneLifecycleState() {
+	files, err := hostAuthList()
+	if err != nil {
+		return
+	}
+	live := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		live[f.AuthIndex] = struct{}{}
+	}
+	lifecycleState.Range(func(key, value any) bool {
+		idx, _ := key.(string)
+		if _, ok := live[idx]; !ok {
+			lifecycleState.Delete(key)
+			return true
+		}
+		if e, ok := value.(*lifecycleStateEntry); ok && time.Since(e.at) > 10*time.Minute {
+			lifecycleState.Delete(key)
+		}
+		return true
+	})
 }
 
 // disableAuth writes disabled:true for a CN (or fallback) account.

@@ -798,6 +798,8 @@ func buildDashboard(force bool) map[string]any {
 		idx, _ := key.(string)
 		if _, ok := live[idx]; !ok {
 			accountCache.Delete(key)
+			checkinLocks.Delete(key)
+			lifecycleState.Delete(key)
 			return true
 		}
 		if e, ok := value.(*accountCacheEntry); ok && time.Since(e.fetched) > 4*accountCacheTTL {
@@ -805,6 +807,9 @@ func buildDashboard(force bool) map[string]any {
 		}
 		return true
 	})
+	// Also prune stale lifecycle state and checkin locks for gone accounts.
+	pruneLifecycleState()
+	pruneCheckinLocks()
 	out := make([]wbAccount, len(files))
 	// Accounts are independent — fetch their dashboards concurrently. With 4
 	// accounts this cuts cold-load latency from ~4×(3 serial upstream calls)
@@ -1227,13 +1232,35 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 }
 
 // checkinLocks serializes per-account manual check-in (B4).
+// Entries are pruned during dashboard prune to avoid unbounded growth
+// when auth accounts are deleted/rotated.
 var (
-	checkinLocks   sync.Map // auth_index -> *sync.Mutex
+	checkinLocks sync.Map // auth_index -> *sync.Mutex
 )
 
 func checkinLockFor(authIndex string) *sync.Mutex {
 	v, _ := checkinLocks.LoadOrStore(authIndex, &sync.Mutex{})
 	return v.(*sync.Mutex)
+}
+
+// pruneCheckinLocks removes lock entries for auth indices that no longer
+// exist in hostAuthList. Call after dashboard prune.
+func pruneCheckinLocks() {
+	files, err := hostAuthList()
+	if err != nil {
+		return
+	}
+	live := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		live[f.AuthIndex] = struct{}{}
+	}
+	checkinLocks.Range(func(key, _ any) bool {
+		idx, _ := key.(string)
+		if _, ok := live[idx]; !ok {
+			checkinLocks.Delete(key)
+		}
+		return true
+	})
 }
 
 // handleImportAuth accepts nested or flat credential JSON and persists via host.auth.save.
