@@ -670,13 +670,14 @@ func reconcileOneAccount(authIndex string, force bool) (action lifecycleAction, 
 	if !lifecycleEnabled() {
 		return lifecycleNone, nil
 	}
-	sa, err := hostAuthGet(authIndex)
+	// Single host.auth.get (A-19): previous hostAuthGet + hostAuthGetPhysical
+	// doubled RPC on every reconcile tick (21 accounts × 2).
+	sa, phys, err := hostAuthGetBundle(authIndex)
 	if err != nil {
 		return lifecycleNone, err
 	}
-	phys, perr := hostAuthGetPhysical(authIndex)
 	disabled := false
-	if perr == nil {
+	if phys != nil {
 		disabled = phys.Disabled
 	}
 
