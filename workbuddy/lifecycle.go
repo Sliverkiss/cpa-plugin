@@ -631,21 +631,17 @@ func deleteAuth(authIndex string, sa *storedAuth) error {
 }
 
 // peerAuthDir returns the directory of any workbuddy auth file known to the host.
+// Uses HostAuthFileEntry.Path from the list response (A-38: was N+1 — list + getPhysical per file).
 func peerAuthDir() string {
 	files, err := hostAuthList()
 	if err != nil {
 		return ""
 	}
 	for _, f := range files {
-		phys, err := hostAuthGetPhysical(f.AuthIndex)
-		if err != nil || phys == nil {
-			continue
+		p := strings.TrimSpace(f.Path)
+		if p != "" {
+			return filepath.Dir(p)
 		}
-		p := strings.TrimSpace(phys.Path)
-		if p == "" {
-			continue
-		}
-		return filepath.Dir(p)
 	}
 	return ""
 }
