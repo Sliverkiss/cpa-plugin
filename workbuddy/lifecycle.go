@@ -588,9 +588,10 @@ func reconcileAllAccounts(force bool) []map[string]any {
 }
 
 // reconcileAfterExecutorError triggers lifecycle when upstream reports hard credit failure.
-// Runs policy after re-fetching credits (never delete on soft 429 alone).
-func reconcileAfterExecutorError(authIndex string, status int, body string) {
-	if !lifecycleEnabled() || strings.TrimSpace(authIndex) == "" {
+// AuthID from the executor may be the credential ID (UID) rather than runtime auth_index;
+// we resolve via host.auth.list when direct get fails.
+func reconcileAfterExecutorError(authID string, status int, body string) {
+	if !lifecycleEnabled() || strings.TrimSpace(authID) == "" {
 		return
 	}
 	if isSoftRateLimit(status, body) && !isHardCreditError(status, body) {
@@ -599,10 +600,42 @@ func reconcileAfterExecutorError(authIndex string, status int, body string) {
 	if !isHardCreditError(status, body) {
 		return
 	}
-	// Async so request path can return promptly; plugin process stays alive.
 	go func() {
-		_, _ = reconcileOneAccount(authIndex, true)
+		idx := resolveAuthIndex(authID)
+		if idx == "" {
+			return
+		}
+		_, _ = reconcileOneAccount(idx, true)
 	}()
+}
+
+// resolveAuthIndex maps executor AuthID (index, file id, or account UID) to host auth_index.
+func resolveAuthIndex(authID string) string {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return ""
+	}
+	// Fast path: already an auth_index the host understands.
+	if _, err := hostAuthGet(authID); err == nil {
+		return authID
+	}
+	files, err := hostAuthList()
+	if err != nil {
+		return ""
+	}
+	for _, f := range files {
+		if f.AuthIndex == authID || f.ID == authID || f.Name == authID {
+			return f.AuthIndex
+		}
+		sa, err := hostAuthGet(f.AuthIndex)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(sa.Account.UID) == authID {
+			return f.AuthIndex
+		}
+	}
+	return ""
 }
 
 // reconcileByUID finds workbuddy auth by account UID and applies executor-error lifecycle.
@@ -614,20 +647,11 @@ func reconcileByUID(uid string, status int, body string) {
 	if !isHardCreditError(status, body) {
 		return
 	}
-	files, err := hostAuthList()
-	if err != nil {
+	idx := resolveAuthIndex(uid)
+	if idx == "" {
 		return
 	}
-	for _, f := range files {
-		sa, err := hostAuthGet(f.AuthIndex)
-		if err != nil {
-			continue
-		}
-		if strings.TrimSpace(sa.Account.UID) == uid {
-			_, _ = reconcileOneAccount(f.AuthIndex, true)
-			return
-		}
-	}
+	_, _ = reconcileOneAccount(idx, true)
 }
 
 // enrichAuthMetadata builds Metadata map for AuthData (type/logo/note/disabled).
