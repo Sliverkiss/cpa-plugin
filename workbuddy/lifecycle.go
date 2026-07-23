@@ -349,7 +349,8 @@ func isPathUnder(path, dir string) bool {
 }
 
 // deleteAuthFileAt removes a workbuddy auth file. Missing file is success.
-// The path must be safe AND, when dir is non-empty, confined under that dir.
+// Deprecated: use deleteAuthFileInDir instead (adds directory + absolute path
+// confinement). Retained for test coverage of the base safe-delete path.
 func deleteAuthFileAt(path string) error {
 	if !isSafeWorkbuddyAuthPath(path) {
 		return fmt.Errorf("refusing to delete unsafe path: %s", path)
