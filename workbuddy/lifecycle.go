@@ -576,8 +576,15 @@ func reconcileOneAccount(authIndex string, force bool) (action lifecycleAction, 
 			// unknown credits → no-op (safe default)
 			return lifecycleNone, nil
 		}
-		// store in cache lightly
-		accountCache.Store(authIndex, &accountCacheEntry{credits: cr, fetched: time.Now()})
+		// Merge into cache without wiping plan/checkin from dashboard fetch.
+		entry := &accountCacheEntry{credits: cr, fetched: time.Now()}
+		if v, ok := accountCache.Load(authIndex); ok {
+			if prev, ok2 := v.(*accountCacheEntry); ok2 {
+				entry.plan = prev.plan
+				entry.checkin = prev.checkin
+			}
+		}
+		accountCache.Store(authIndex, entry)
 	}
 
 	region := accountRegion(sa)

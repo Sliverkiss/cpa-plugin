@@ -730,7 +730,7 @@ func buildDashboard(force bool) map[string]any {
 	if force && lifecycleEnabled() {
 		life = reconcileAllAccounts(true)
 		// Drop accounts deleted during reconcile (Global exhaust) and refresh
-		// disabled flags from disk (host list may lag after save).
+		// disabled/exhausted from disk/cache (host list may lag after save).
 		if files2, err2 := hostAuthList(); err2 == nil {
 			live := make(map[string]struct{}, len(files2))
 			disabledBy := make(map[string]bool, len(files2))
@@ -748,6 +748,21 @@ func buildDashboard(force bool) map[string]any {
 				}
 				if d, ok := disabledBy[a.AuthIndex]; ok {
 					a.Disabled = d
+				}
+				// Credits may have been refreshed during reconcile — re-read cache.
+				if v, ok := accountCache.Load(a.AuthIndex); ok {
+					if e, ok2 := v.(*accountCacheEntry); ok2 {
+						if e.credits != nil {
+							a.Credits = e.credits
+							a.Exhausted = isCreditsExhausted(e.credits)
+						}
+						if e.plan != "" {
+							a.Plan = e.plan
+						}
+						if e.checkin != nil {
+							a.Checkin = e.checkin
+						}
+					}
 				}
 				filtered = append(filtered, a)
 			}
