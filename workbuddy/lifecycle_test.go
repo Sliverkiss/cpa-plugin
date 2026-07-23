@@ -219,3 +219,55 @@ func TestLabelForAuth(t *testing.T) {
 		t.Fatalf("label=%q", got)
 	}
 }
+
+func TestWriteAuthFileIfSafe(t *testing.T) {
+	dir := t.TempDir()
+	okPath := filepath.Join(dir, "workbuddy-safe.json")
+	raw := []byte(`{"type":"workbuddy","disabled":true}`)
+	if err := writeAuthFileIfSafe(okPath, raw); err != nil {
+		t.Fatalf("write safe path: %v", err)
+	}
+	got, err := os.ReadFile(okPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(raw) {
+		t.Fatalf("content mismatch: %s", got)
+	}
+	// unsafe name: no-op, no error
+	bad := filepath.Join(dir, "evil.json")
+	if err := writeAuthFileIfSafe(bad, raw); err != nil {
+		t.Fatalf("unsafe should no-op: %v", err)
+	}
+	if _, err := os.Stat(bad); !os.IsNotExist(err) {
+		t.Fatal("unsafe path must not be written")
+	}
+	if err := writeAuthFileIfSafe(okPath, nil); err == nil {
+		t.Fatal("empty payload should error")
+	}
+}
+
+func TestLifecycleActionFor_IdempotentPolicy(t *testing.T) {
+	// Applying action twice with same inputs must stay disable/delete (not flip).
+	ex := &creditsSummary{TotalRemain: 0, TotalUsed: 1}
+	if lifecycleActionFor("cn", ex) != lifecycleDisable {
+		t.Fatal("cn")
+	}
+	if lifecycleActionFor("global", ex) != lifecycleDelete {
+		t.Fatal("global")
+	}
+	// Soft rate limit body never hard-credit alone.
+	if isHardCreditError(429, "too many requests") {
+		t.Fatal("429 body without credit markers is not hard")
+	}
+	if !isSoftRateLimit(429, "rate limit") {
+		t.Fatal("429 soft")
+	}
+}
+
+func TestParseDisabledFromAuthJSON_StringTruth(t *testing.T) {
+	// Only JSON boolean true counts; string "true" is false for strict parse.
+	if parseDisabledFromAuthJSON([]byte(`{"disabled":"true"}`)) {
+		t.Fatal("string true should not parse as bool true with current schema")
+	}
+}
