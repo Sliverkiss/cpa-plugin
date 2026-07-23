@@ -243,7 +243,8 @@ func streamEmitError(streamID, message string) {
 	if streamID == "" {
 		return
 	}
-	errJSON, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message}})
+	// A-37: never emit raw upstream bodies that may contain Bearer/JWT.
+	errJSON, _ := json.Marshal(map[string]any{"error": map[string]any{"message": redactSecrets(message)}})
 	_ = streamEmit(streamID, errJSON)
 }
 
@@ -342,7 +343,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.6.6"
+var version = "0.6.7"
 
 func wbRegistration() registration {
 	return registration{
@@ -797,13 +798,22 @@ func redactSecrets(s string) string {
 	s = redactREBearer.ReplaceAllString(s, "Bearer ***")
 	// long JWT-ish segments
 	s = redactREJWT.ReplaceAllString(s, "***jwt***")
+	// access_token / refresh_token query-or-json fragments (best-effort)
+	s = redactRETokenKV.ReplaceAllString(s, "${1}***")
 	return s
 }
 
 var (
-	redactREBearer = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._\-+/=]{12,}`)
-	redactREJWT    = regexp.MustCompile(`\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b`)
+	redactREBearer  = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._\-+/=]{12,}`)
+	redactREJWT     = regexp.MustCompile(`\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b`)
+	redactRETokenKV = regexp.MustCompile(`(?i)((?:access_token|refresh_token|id_token)\s*[=:]\s*)([A-Za-z0-9._\-+/=]{12,})`)
 )
+
+// truncateRedacted redacts secrets then truncates — use for any error body
+// returned to clients / logs (A-37). publishUsage already redacts Fail.Body.
+func truncateRedacted(s string, n int) string {
+	return truncate(redactSecrets(s), n)
+}
 
 func normalizeUsageDetail(d usage.Detail) usage.Detail {
 	if d.TotalTokens == 0 {
@@ -1422,7 +1432,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		payload, _ := io.ReadAll(resp.Body)
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, resp.StatusCode, string(payload))
 		reconcileAfterExecutorError(req.AuthID, resp.StatusCode, string(payload))
-		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(payload), 200))
+		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncateRedacted(string(payload), 200))
 	}
 	completion, err := aggregateCompletion(resp.Body, req.Model)
 	if err != nil {
@@ -1529,7 +1539,7 @@ func pumpUpstreamStream(httpReq *http.Request, streamID string, sseFramed bool, 
 		if authUID != "" {
 			go reconcileByUID(authUID, resp.StatusCode, string(errPayload))
 		}
-		streamEmitError(streamID, fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncate(string(errPayload), 200)))
+		streamEmitError(streamID, fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncateRedacted(string(errPayload), 200)))
 		return
 	}
 	collector := &sseUsageCollector{}
@@ -1585,7 +1595,7 @@ func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collecto
 		if sa != nil && sa.Account.UID != "" {
 			go reconcileByUID(sa.Account.UID, resp.StatusCode, string(errPayload))
 		}
-		return nil, resp.StatusCode, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(errPayload), 200))
+		return nil, resp.StatusCode, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncateRedacted(string(errPayload), 200))
 	}
 	chunks, errAgg := aggregateSSEWithCollector(resp.Body, sseFramed, collector)
 	if errAgg != nil {
