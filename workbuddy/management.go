@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -75,7 +76,22 @@ var checkinHours = []int{9, 21}
 var (
 	checkinAuto   = true // enabled by default
 	checkinAutoMu sync.RWMutex
+
+	// usageReportURL / usageReportKey: POST NDJSON to CPA-Manager-Plus
+	// /v0/management/usage/import (only path that reaches request monitoring;
+	// c-shared plugins cannot use host usage.DefaultManager/redisqueue).
+	//
+	// Resolution order (community-style, like codex-auth-importer env injection):
+	//  1) plugins.configs.workbuddy.usage_report_* in config.yaml
+	//  2) env USAGE_REPORT_URL / USAGE_REPORT_KEY / CPAMP_ADMIN_KEY
+	//  3) secret files (docker secrets / bind-mount), e.g. /run/secrets/cpamp_admin_key
+	// Default URL targets the compose service name of CPA-Manager-Plus.
+	usageReportURL = defaultUsageReportURL
+	usageReportKey = ""
+	usageReportMu  sync.RWMutex
 )
+
+const defaultUsageReportURL = "http://cpa-manager-plus:18317/v0/management/usage/import"
 
 // configure decodes plugin config from the lifecycle request.
 func configure(raw []byte) {
@@ -88,6 +104,8 @@ func configure(raw []byte) {
 	schedulerModeMu.Lock()
 	defer schedulerModeMu.Unlock()
 	schedulerMode = schedulerModeOff // reset to default on reconfigure
+
+	cfgURL, cfgKey := "", ""
 	if len(raw) > 0 {
 		var req struct {
 			ConfigYAML []byte `json:"config_yaml"`
@@ -116,10 +134,70 @@ func configure(raw []byte) {
 						schedulerMode = schedulerModeOff
 					}
 				}
+				if strings.HasPrefix(line, "usage_report_url:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "usage_report_url:"))
+					cfgURL = strings.Trim(v, "\"'")
+				}
+				if strings.HasPrefix(line, "usage_report_key:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "usage_report_key:"))
+					cfgKey = strings.Trim(v, "\"'")
+				}
 			}
 		}
 	}
+	resolveUsageReport(cfgURL, cfgKey)
 	ensureScheduler()
+}
+
+// resolveUsageReport fills usageReportURL/key from config → env → secret files.
+// Mirrors community plugins that inject management keys via env/build (e.g.
+// codex-auth-importer CODEX_AUTH_IMPORTER_MANAGEMENT_KEY), not plaintext CPA
+// remote-management.secret-key (that field is bcrypt-hashed).
+func resolveUsageReport(cfgURL, cfgKey string) {
+	url := firstNonEmpty(
+		strings.TrimSpace(cfgURL),
+		strings.TrimSpace(os.Getenv("USAGE_REPORT_URL")),
+		strings.TrimSpace(os.Getenv("CPAMP_USAGE_IMPORT_URL")),
+		defaultUsageReportURL,
+	)
+	key := firstNonEmpty(
+		strings.TrimSpace(cfgKey),
+		strings.TrimSpace(os.Getenv("USAGE_REPORT_KEY")),
+		strings.TrimSpace(os.Getenv("CPAMP_ADMIN_KEY")),
+		strings.TrimSpace(os.Getenv("CPA_MANAGER_ADMIN_KEY")),
+		readSecretFile(os.Getenv("USAGE_REPORT_KEY_FILE")),
+		readSecretFile(os.Getenv("CPAMP_ADMIN_KEY_FILE")),
+		readSecretFile(os.Getenv("CPA_MANAGER_ADMIN_KEY_FILE")),
+		// docker compose secrets default path
+		readSecretFile("/run/secrets/cpamp_admin_key"),
+		readSecretFile("/run/secrets/cpamp-admin-key"),
+		// optional bind-mounts used on this host
+		readSecretFile("/CLIProxyAPI/secrets/cpamp-admin-key"),
+		readSecretFile("/CLIProxyAPI/secrets/cpamp_admin_key"),
+	)
+	usageReportMu.Lock()
+	usageReportURL = url
+	usageReportKey = key
+	usageReportMu.Unlock()
+}
+
+func readSecretFile(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// usageReportConfigured reports whether request-monitoring export is ready.
+func usageReportConfigured() bool {
+	usageReportMu.RLock()
+	defer usageReportMu.RUnlock()
+	return strings.TrimSpace(usageReportURL) != "" && strings.TrimSpace(usageReportKey) != ""
 }
 
 // -----------------------------------------------------------------------------

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.13
+
+### Changed
+- 请求监控 key 自动探测：config → env（CPAMP_ADMIN_KEY/USAGE_REPORT_KEY）→ docker secret `/run/secrets/cpamp_admin_key`，无需手写 usage_report_key
+
+
+## 0.6.12
+
+### Changed
+- 删除无效 `usage.PublishRecord` 路径，请求监控仅走 CPAMP `/v0/management/usage/import`
+
+
+## 0.6.11
+
+### Fixed
+- **请求监控**：c-shared 隔离导致 `usage.PublishRecord` 进不了宿主 redisqueue；改为异步 POST CPA-Manager-Plus `/v0/management/usage/import`（`usage_report_url`/`usage_report_key`）
+- 补全 ExecutorType/AuthType/Source；配置字段暴露于管理面板
+
+
 ## 0.6.10
 
 ### Fixed

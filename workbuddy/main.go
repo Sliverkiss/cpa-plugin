@@ -343,7 +343,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.6.10"
+var version = "0.6.13"
 
 func wbRegistration() registration {
 	return registration{
@@ -359,6 +359,8 @@ func wbRegistration() registration {
 				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto disable CN / delete Global when credits exhausted; re-enable CN after check-in restores credits (default true)."},
 				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning."},
 				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining)."},
+				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
+				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},
 			},
 		},
 		Capabilities: registrationCapability{
@@ -756,37 +758,109 @@ func rewriteModelInBody(body []byte, upstreamModel string) []byte {
 // Usage reporting (request monitoring)
 // ------------------------------------------------------------------------------
 //
-// CPA's built-in executors (xai, codex, ...) publish usage records via
-// helps.UsageReporter; the plugin-executor path does not, so requests handled
-// by this plugin never reach the usage queue / statistics. The plugin shares
-// the host process, so usage.PublishRecord delivers to the same DefaultManager
-// the built-ins use. There is no ctx across the C ABI, so a background context
-// is used — usage sinks (redisqueue etc.) do not depend on request ctx.
+// CPA built-in executors publish via host usage.DefaultManager → redisqueue.
+// Plugin executors cannot: c-shared .so has its own Go runtime, so
+// usage.PublishRecord would hit a separate empty DefaultManager (no sink).
+//
+// Only effective path: POST NDJSON to CPA-Manager-Plus
+// /v0/management/usage/import. Key/URL resolved automatically from
+// config → env → docker secret files (see resolveUsageReport).
+// usage.Detail is still used as a pure token-counter struct.
 
-// publishUsage emits one usage record for an upstream attempt. requestedModel
-// is the client-facing model (possibly an alias), upstreamModel the resolved
-// real model. Token detail is best-effort; failures carry status/body.
+// publishUsage reports one upstream attempt into CPAMP request monitoring.
+// requestedModel is client-facing (may be alias); upstreamModel is resolved.
 func publishUsage(requestedModel, upstreamModel, authID string, started time.Time, detail usage.Detail, failed bool, statusCode int, errBody string) {
 	model := strings.TrimSpace(upstreamModel)
 	if model == "" {
 		model = strings.TrimSpace(requestedModel)
 	}
-	record := usage.Record{
-		Provider:    providerName,
-		Model:       model,
-		Alias:       strings.TrimSpace(requestedModel),
-		AuthID:      strings.TrimSpace(authID),
-		RequestedAt: started,
-		Failed:      failed,
-		Detail:      normalizeUsageDetail(detail),
+	alias := strings.TrimSpace(requestedModel)
+	if alias == "" {
+		alias = model
 	}
+	go reportUsageToCPAMP(alias, model, authID, started, normalizeUsageDetail(detail), failed, statusCode, errBody)
+}
+
+// reportUsageToCPAMP POSTs one NDJSON line to CPAMP usage/import.
+// Silent on misconfig / network errors — never blocks chat.
+func reportUsageToCPAMP(alias, model, authID string, started time.Time, detail usage.Detail, failed bool, statusCode int, errBody string) {
+	usageReportMu.RLock()
+	url := strings.TrimSpace(usageReportURL)
+	key := strings.TrimSpace(usageReportKey)
+	usageReportMu.RUnlock()
+	if url == "" || key == "" {
+		return
+	}
+	ts := started
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	latencyMs := int64(0)
 	if !started.IsZero() {
-		record.Latency = time.Since(started)
+		latencyMs = time.Since(started).Milliseconds()
+		if latencyMs < 0 {
+			latencyMs = 0
+		}
 	}
+	total := detail.TotalTokens
+	if total == 0 {
+		total = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+	}
+	failBody := ""
+	failCode := 200
 	if failed {
-		record.Fail = usage.Failure{StatusCode: statusCode, Body: truncate(redactSecrets(errBody), 512)}
+		failCode = statusCode
+		if failCode <= 0 {
+			failCode = 502
+		}
+		failBody = truncate(redactSecrets(errBody), 512)
 	}
-	usage.PublishRecord(context.Background(), record)
+	payload := map[string]any{
+		"timestamp":    ts.UTC().Format(time.RFC3339Nano),
+		"latency_ms":   latencyMs,
+		"source":       "workbuddy",
+		"auth_index":   strings.TrimSpace(authID),
+		"provider":     providerName,
+		"model":        model,
+		"alias":        alias,
+		"endpoint":     "POST /v1/chat/completions",
+		"auth_type":    "oauth",
+		"executor_type": "workbuddy",
+		"generate":     true,
+		"failed":       failed,
+		"tokens": map[string]any{
+			"input_tokens":          detail.InputTokens,
+			"output_tokens":         detail.OutputTokens,
+			"reasoning_tokens":      detail.ReasoningTokens,
+			"cached_tokens":         detail.CachedTokens,
+			"cache_read_tokens":     detail.CacheReadTokens,
+			"cache_creation_tokens": detail.CacheCreationTokens,
+			"total_tokens":          total,
+		},
+		"fail": map[string]any{
+			"status_code": failCode,
+			"body":        failBody,
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	body = append(body, '\n')
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/x-ndjson")
+	resp, err := sharedHTTPClient().Do(req)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
 }
 
 // redactSecrets strips bearer tokens / JWT-like blobs from error bodies before usage publish.
@@ -2100,8 +2174,8 @@ func mergeToolCallDelta(merged, delta map[string]any) {
 
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
-		if v != "" {
-			return v
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
 		}
 	}
 	return ""
