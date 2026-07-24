@@ -891,6 +891,15 @@ func pruneAccountCacheSoftCap(capN int) {
 }
 
 func buildDashboard(force bool) map[string]any {
+	return buildDashboardEx(force, true)
+}
+
+// buildDashboardEx builds the account dashboard. When fetchCredits is false,
+// credits/checkin/plan fields are left empty — the panel renders skeletons
+// and fetches them lazily via /credits?auth_index=<idx>. This avoids hitting
+// upstream billing APIs for all accounts simultaneously on page load (which
+// causes 500 from rate-limited /v2/billing/meter/get-user-resource).
+func buildDashboardEx(force, fetchCredits bool) map[string]any {
 	files, err := hostAuthList()
 	if err != nil {
 		return map[string]any{"error": err.Error()}
@@ -950,17 +959,32 @@ func buildDashboard(force bool) map[string]any {
 			acct.Nickname = sa.Account.Nickname
 			acct.UID = sa.Account.UID
 			acct.Region = accountRegion(sa)
-			plan, ci, cr, errs := cachedAccountDetails(f.AuthIndex, sa, force)
-			acct.Plan = plan
-			acct.Checkin = ci
-			acct.Credits = cr
-			acct.Exhausted = isCreditsExhausted(cr)
-			if isGlobalDomain(sa.Auth.Domain) {
-				acct.TrialClaimed = hasTrialPack(cr)
+			if fetchCredits {
+				plan, ci, cr, errs := cachedAccountDetails(f.AuthIndex, sa, force)
+				acct.Plan = plan
+				acct.Checkin = ci
+				acct.Credits = cr
+				acct.Exhausted = isCreditsExhausted(cr)
+				if isGlobalDomain(sa.Auth.Domain) {
+					acct.TrialClaimed = hasTrialPack(cr)
+				}
+				// Keep note in sync (throttled); do not block dashboard on save errors.
+				_ = syncAuthNote(f.AuthIndex, sa, cr, acct.Disabled)
+				acct.Error = strings.Join(errs, "; ")
+			} else {
+				// Light load: use cached values if available, but don't fetch upstream.
+				if v, ok := accountCache.Load(f.AuthIndex); ok {
+					if e, ok2 := v.(*accountCacheEntry); ok2 {
+						acct.Plan = e.plan
+						acct.Checkin = e.checkin
+						acct.Credits = e.credits
+						acct.Exhausted = isCreditsExhausted(e.credits)
+						if isGlobalDomain(sa.Auth.Domain) {
+							acct.TrialClaimed = hasTrialPack(e.credits)
+						}
+					}
+				}
 			}
-			// Keep note in sync (throttled); do not block dashboard on save errors.
-			_ = syncAuthNote(f.AuthIndex, sa, cr, acct.Disabled)
-			acct.Error = strings.Join(errs, "; ")
 			out[i] = acct
 		}(i, f)
 	}
@@ -1248,9 +1272,9 @@ func handleManagement(raw []byte) ([]byte, error) {
 	base := "/v0/management/plugins/" + providerName
 	switch {
 	case req.Method == http.MethodGet && path == base+"/accounts":
-		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildDashboard(false)))
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildDashboardEx(false, false)))
 	case req.Method == http.MethodPost && path == base+"/refresh":
-		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildDashboard(true)))
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildDashboardEx(true, true)))
 	case req.Method == http.MethodPost && path == base+"/checkin":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleManualCheckin(req)))
 	case req.Method == http.MethodPost && path == base+"/checkin/config":
@@ -1747,6 +1771,9 @@ func handleSelectAuth(req pluginapi.ManagementRequest) map[string]any {
 
 // handleCreditsQuery returns real-time credits for one or all accounts.
 // Pass ?auth_index=<idx> to query a single account; omit for all.
+// Single-account mode returns full account info (nickname, region, credits,
+// exhausted, trial_claimed) so the panel can update one card without
+// reloading the entire dashboard.
 func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 	authIndex := ""
 	if vals := req.Query["auth_index"]; len(vals) > 0 {
@@ -1756,6 +1783,62 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
+	// Single-account: return one full account row (like dashboard entry).
+	if authIndex != "" {
+		for _, f := range files {
+			if f.AuthIndex != authIndex {
+				continue
+			}
+			sa, err := hostAuthGet(f.AuthIndex)
+			if err != nil {
+				return map[string]any{"accounts": []map[string]any{{
+					"auth_index": authIndex, "error": "load auth: " + err.Error(),
+				}}}
+			}
+			cr, err := fetchUserResource(sa)
+			acct := map[string]any{
+				"auth_index": authIndex,
+				"nickname":   sa.Account.Nickname,
+				"uid":        sa.Account.UID,
+				"region":      accountRegion(sa),
+				"name":       f.Name,
+				"label":      f.Label,
+				"disabled":   f.Disabled,
+				"selected":   getActiveAuthID() == authIndex,
+			}
+			if err != nil {
+				acct["error"] = err.Error()
+			} else {
+				acct["credits"] = cr
+				acct["exhausted"] = isCreditsExhausted(cr)
+				if isGlobalDomain(sa.Auth.Domain) {
+					acct["trial_claimed"] = hasTrialPack(cr)
+				}
+				// Update cache so subsequent dashboard loads see fresh data.
+				now := time.Now()
+				if cr != nil {
+					cr.FetchedAt = now.UTC().Format(time.RFC3339)
+				}
+				// Merge into existing cache entry (keep plan/checkin if present).
+				var prev *accountCacheEntry
+				if v, ok := accountCache.Load(authIndex); ok {
+					prev, _ = v.(*accountCacheEntry)
+				}
+				var plan string
+				var ci *checkinSummary
+				if prev != nil {
+					plan = prev.plan
+					ci = prev.checkin
+				}
+				accountCache.Store(authIndex, &accountCacheEntry{
+					checkin: ci, credits: cr, plan: plan, fetched: now,
+				})
+			}
+			return map[string]any{"accounts": []map[string]any{acct}}
+		}
+		return map[string]any{"error": "account not found"}
+	}
+	// All accounts: return simplified list.
 	type acctCredits struct {
 		AuthIndex string           `json:"auth_index"`
 		Nickname  string           `json:"nickname"`
@@ -1765,9 +1848,6 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 	}
 	var out []acctCredits
 	for _, f := range files {
-		if authIndex != "" && f.AuthIndex != authIndex {
-			continue
-		}
 		sa, err := hostAuthGet(f.AuthIndex)
 		if err != nil {
 			out = append(out, acctCredits{AuthIndex: f.AuthIndex, Error: "load auth: " + err.Error()})

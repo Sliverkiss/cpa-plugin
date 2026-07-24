@@ -305,7 +305,7 @@ function esc(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">
 function progressHTML(c){
   // total uses size when known; remain = spendable, used = cycle spend.
   // Check-in adds packs → size/remain go UP (grant). Chat spend → used goes UP, remain DOWN.
-  if(!c||(!(c.total_remain||0)&&!(c.total_used||0)&&!(c.total_size||0)))return '<div class="pb"><div class="pb-label"><span>可用积分</span><span>-</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
+  if(!c||(!(c.total_remain||0)&&!(c.total_used||0)&&!(c.total_size||0)))return '<div class="pb"><div class="pb-label"><span>可用积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
   const remain=c.total_remain||0, used=c.total_used||0;
   const size=c.total_size||(remain+used);
   const total=size>0?size:(remain+used);
@@ -341,13 +341,14 @@ function card(a){
   const selectBtn=selected
     ? `<button class="done" disabled="disabled">使用中</button>`
     : (disabled?``:`<button class="sec" onclick="selectAuth('${esc(a.auth_index)}',this)">选用</button>`);
+  const refreshBtn=`<button class="sec" onclick="refreshCredits('${esc(a.auth_index)}',this)" title="刷新积分">刷新</button>`;
   const badges=(selected?`<span class="badge" style="background:var(--acc-ring);color:var(--acc);border-color:var(--acc)">使用中</span>`:"")+(disabled?`<span class="badge disabled">已禁用</span>`:"")+(exhausted?`<span class="badge exhausted">耗尽</span>`:"")+regionBadge+`<span class="badge ${plan}">${esc(a.plan||"-")}</span>`;
   return `<div class="card${selected?" selected":""}" data-region="${region}" data-auth="${esc(a.auth_index)}">
   <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
   ${progressHTML(cr)}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
-  <div class="actions">${selectBtn}${actionHTML}</div>
+  <div class="actions">${selectBtn}${refreshBtn}${actionHTML}</div>
   </div>`;
 }
 let currentFilter="all";
@@ -355,6 +356,62 @@ let lastAccounts=[];
 let activeAuthId="";
 let authFailCount=0;
 let authFailUntil=0;
+// Lazy-load: fetch credits for cards that lack them, one at a time with retry.
+function lazyLoadCredits(accounts){
+  const need=accounts.filter(a=>!a.credits&&!a.error&&!a.disabled);
+  if(!need.length) return;
+  let i=0;
+  function fetchOne(){
+    if(i>=need.length) return;
+    const a=need[i++];
+    const idx=a.auth_index;
+    // Update card to show loading spinner (progressHTML already does this
+    // when credits is null). Just ensure the card has data-auth.
+    api(`/credits?auth_index=${encodeURIComponent(idx)}`)
+      .then(d=>{
+        const acct=(d.accounts||[])[0]||d;
+        if(d.error){ a.error=d.error; }
+        if(acct&&acct.credits){
+          a.credits=acct.credits;
+          a.exhausted=acct.exhausted;
+          if(acct.trial_claimed!=null) a.trial_claimed=acct.trial_claimed;
+          if(acct.plan) a.plan=acct.plan;
+        }
+        if(acct&&acct.error){ a.error=acct.error; }
+        // Re-render this one card.
+        updateOneCard(a);
+      })
+      .catch(e=>{
+        // Retry once after 2s; if still fails, show error on card.
+        setTimeout(()=>{
+          api(`/credits?auth_index=${encodeURIComponent(idx)}`)
+            .then(d=>{
+              const acct=(d.accounts||[])[0]||d;
+              if(acct&&acct.credits){ a.credits=acct.credits; a.exhausted=acct.exhausted; }
+              if(d.error||acct&&acct.error) a.error=d.error||acct.error;
+              updateOneCard(a);
+            })
+            .catch(()=>{ a.error="积分查询失败"; updateOneCard(a); })
+        },2000);
+      })
+      .finally(()=>{ setTimeout(fetchOne, 300); }); // stagger next card
+  }
+  fetchOne();
+}
+function updateOneCard(a){
+  const el=document.querySelector(`#grid .card[data-auth="${CSS.escape(a.auth_index)}"]`);
+  if(!el) return;
+  // Build new card HTML and replace.
+  const tmp=document.createElement('div');
+  tmp.innerHTML=card(a);
+  if(tmp.firstChild) el.replaceWith(tmp.firstChild);
+  filterRegion(currentFilter, null);
+  // Update summary if all done.
+  const all=lastAccounts||[];
+  if(all.every(x=>x.credits||x.error||x.disabled)){
+    renderSummary(all);
+  }
+}
 function filterRegion(region, btn){
   currentFilter=region||"all";
   document.querySelectorAll(".ftag").forEach(b=>b.classList.remove("active"));
@@ -537,6 +594,8 @@ async function load(force, btn){
     g.innerHTML=accounts.map(card).join("");
     filterRegion(currentFilter, null);
     renderSummary(accounts);
+    // Lazy-load credits for cards that don't have them yet.
+    lazyLoadCredits(accounts);
     if(force){
       const errN=accounts.filter(a=>a.error).length;
       const life=(d.lifecycle||[]).length;
@@ -621,6 +680,35 @@ async function selectAuth(idx, btn){
     filterRegion(currentFilter, null);
   }catch(e){
     toast("选用失败","err",e.message||String(e));
+  }finally{
+    busy(btn,false);
+  }
+}
+async function refreshCredits(idx, btn){
+  busy(btn,true);
+  try{
+    const d=await api(`/credits?auth_index=${encodeURIComponent(idx)}`);
+    const acct=(d.accounts||[])[0]||d;
+    if(d.error||acct&&acct.error){
+      toast("刷新失败","err",d.error||(acct&&acct.error)||"未知错误");
+      busy(btn,false);
+      return;
+    }
+    // Update local state and re-render this card.
+    const a=(lastAccounts||[]).find(x=>x.auth_index===idx);
+    if(a){
+      if(acct.credits) a.credits=acct.credits;
+      if(acct.exhausted!=null) a.exhausted=acct.exhausted;
+      if(acct.trial_claimed!=null) a.trial_claimed=acct.trial_claimed;
+      if(acct.plan) a.plan=acct.plan;
+      if(acct.error) a.error=acct.error; else a.error="";
+      updateOneCard(a);
+    }
+    const remain=acct&&acct.credits?acct.credits.total_remain:"?";
+    const who=acct&&acct.nickname?acct.nickname:idx;
+    toast("积分已刷新","ok",who+" · 剩余 "+remain);
+  }catch(e){
+    toast("刷新失败","err",e.message||String(e));
   }finally{
     busy(btn,false);
   }

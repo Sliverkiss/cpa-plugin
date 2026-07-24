@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.19
+
+### Added
+- 每张卡片新增「刷新」按钮：单独查询积分并即时更新该卡
+
+## 0.6.18
+
+### Added
+- 积分懒加载：进页面先渲染骨架卡（加载中…），逐卡异步拉积分，失败自动重试一次
+- 后端 `/accounts` 默认不再并发拉所有账号 credits（避免上游 500）
+- `/credits?auth_index=` 单账号查询返回完整字段（region/exhausted/trial_claimed）
+
+### Fixed
+- 缓存有效时仍返回缓存的 credits，不再触发上游请求
+
 ## 0.6.17
 
 ### Fixed
