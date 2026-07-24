@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.17
+
+### Fixed
+- 流式路径也强制 `stream:true`：WorkBuddy API 现仅支持 stream 模式，`stream:false` 会报 "Non-stream chat request is currently not supported"
+
 ## 0.6.16
 
 ### Fixed

@@ -351,7 +351,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.6.16"
+var version = "0.6.17"
 
 func wbRegistration() registration {
 	return registration{
@@ -1614,7 +1614,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	if len(body) == 0 {
 		body = req.OriginalRequest
 	}
-	body = rewriteModelInBody(normalizeToolsForUpstream(rewriteSystemForUpstream(body)), upstreamModel)
+	body = rewriteModelInBody(normalizeToolsForUpstream(rewriteSystemForUpstream(forceStreamBody(body, nil))), upstreamModel)
 	body = ensureSystemMessage(body, sa)
 
 	headers := streamHeaders()
