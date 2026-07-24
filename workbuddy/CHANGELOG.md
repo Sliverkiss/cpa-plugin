@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.27
+
+### Fixed
+- ensureDefaultActiveAuth 也检查 Exhausted：面板刷新时选中账号已耗尽会同步切换
+  修复 scheduler.pick 切了但面板 ensureDefaultActiveAuth 又选回去的 race
+  现在 pickActiveAuth 和 ensureDefaultActiveAuth 用同一套规则，选中状态不会漂移
+
 ## 0.6.26
 
 ### Fixed

@@ -95,20 +95,32 @@ func pickActiveAuth(candidates []activeAuthCandidate) string {
 	return next
 }
 
-// ensureDefaultActiveAuth sets the first non-disabled account when none selected.
-// Called from dashboard listing so panel shows a default without waiting for chat.
+// ensureDefaultActiveAuth sets the panel-selected account.
+// Called from buildDashboardEx on every /accounts and /refresh request.
+//
+// Rules (single source of truth, same as pickActiveAuth):
+//  1. If current selection is live AND not exhausted → keep it.
+//  2. If current selection is exhausted → switch to first non-exhausted.
+//  3. If current selection is gone (disabled/deleted) → switch to first available.
+//  4. If all exhausted → keep current if alive, else first.
+//
+// This ensures the panel's selected card always matches what scheduler.pick
+// actually routes to. No silent drift.
 func ensureDefaultActiveAuth(accounts []wbAccount) string {
 	cur := getActiveAuthID()
 	live := make(map[string]wbAccount, len(accounts))
 	for _, a := range accounts {
 		live[a.AuthIndex] = a
 	}
+
+	// Rule 1: current selection is live AND not exhausted → keep.
 	if cur != "" {
-		if a, ok := live[cur]; ok && !a.Disabled {
+		if a, ok := live[cur]; ok && !a.Disabled && !a.Exhausted {
 			return cur
 		}
 	}
-	// Prefer first non-disabled non-exhausted, else first non-disabled, else first.
+
+	// Rule 2 & 3: selection is exhausted or gone → find next.
 	var firstAny, firstOK, firstReady string
 	for _, a := range accounts {
 		if firstAny == "" {
@@ -124,14 +136,22 @@ func ensureDefaultActiveAuth(accounts []wbAccount) string {
 			firstReady = a.AuthIndex
 		}
 	}
+
+	// Prefer first non-exhausted non-disabled.
 	next := firstReady
 	if next == "" {
+		// Rule 4: all exhausted — keep current if still alive (not disabled).
+		if cur != "" {
+			if a, ok := live[cur]; ok && !a.Disabled {
+				return cur
+			}
+		}
 		next = firstOK
 	}
 	if next == "" {
 		next = firstAny
 	}
-	if next != "" {
+	if next != "" && next != cur {
 		setActiveAuthID(next)
 	}
 	return next

@@ -251,12 +251,41 @@ func TestEnsureDefaultActiveAuth(t *testing.T) {
 	if getActiveAuthID() != "a2" {
 		t.Fatalf("stuck active %q", getActiveAuthID())
 	}
-	// Already set + still live → keep
+	// Already set + still live + not exhausted → keep
 	id2 := ensureDefaultActiveAuth([]wbAccount{
 		{AuthIndex: "a2"},
 		{AuthIndex: "a3"},
 	})
 	if id2 != "a2" {
 		t.Fatalf("should keep a2, got %q", id2)
+	}
+}
+
+func TestEnsureDefaultActiveAuth_SwitchesWhenExhausted(t *testing.T) {
+	resetActiveAuth(t)
+	// Selected a1 is exhausted → should switch to first non-exhausted.
+	setActiveAuthID("a1")
+	id := ensureDefaultActiveAuth([]wbAccount{
+		{AuthIndex: "a1", Exhausted: true},
+		{AuthIndex: "a2", Exhausted: false},
+		{AuthIndex: "a3", Exhausted: false},
+	})
+	if id != "a2" {
+		t.Fatalf("want switch to a2, got %q", id)
+	}
+	if getActiveAuthID() != "a2" {
+		t.Fatalf("active should be a2, got %q", getActiveAuthID())
+	}
+}
+
+func TestEnsureDefaultActiveAuth_AllExhausted_KeepsCurrent(t *testing.T) {
+	resetActiveAuth(t)
+	setActiveAuthID("a1")
+	id := ensureDefaultActiveAuth([]wbAccount{
+		{AuthIndex: "a1", Exhausted: true},
+		{AuthIndex: "a2", Exhausted: true},
+	})
+	if id != "a1" {
+		t.Fatalf("all exhausted should keep a1, got %q", id)
 	}
 }
