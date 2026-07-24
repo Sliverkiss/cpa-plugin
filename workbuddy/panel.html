@@ -51,7 +51,8 @@ button{background:var(--acc);color:var(--on-acc);border:0;border-radius:8px;padd
 button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background:var(--btn-sec-hover)}button:disabled{opacity:.5;cursor:default}
 .toggle{display:flex;gap:8px;align-items:center;color:var(--mut);font-size:13px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+.card,.summary{background:var(--card);border:1px solid var(--border);border-radius:12px}
+.card{padding:16px}
 .card.selected{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-ring)}
 .card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center}
 .uid{color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:12px}
@@ -65,13 +66,14 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .ftag{background:var(--surface);border:1px solid var(--border);color:var(--mut);border-radius:99px;padding:5px 14px;font-size:12px;cursor:pointer;font-weight:600}
 .ftag.active{background:var(--acc);color:var(--on-acc);border-color:var(--acc)}
 .ftag .cnt{font-size:10px;opacity:.75;margin-left:4px}
-/* 用量汇总卡：跟 CPA 一样走 --card，白天白/纸色，晚上深色 */
-.summary{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+/* 用量汇总与账号卡共用 --card，避免夜间两套底色 */
+.summary{padding:16px;margin-bottom:14px}
 .summary-hd{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 .summary-title{font-weight:700;font-size:14px}
 .summary-meta{color:var(--mut);font-size:12px}
 .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:10px}
-.summary-item{background:var(--surface-muted);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
+/* 内嵌指标格：与账号卡内部表面一致（--surface），不用更深的 surface-muted */
+.summary-item{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
 .summary-item .k{color:var(--mut);font-size:11px;margin-bottom:4px}
 .summary-item .v{font-size:18px;font-weight:700}
 .summary-item .v.ok{color:var(--ok)}
@@ -191,7 +193,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <button type="button" class="ftag" data-region="cn" onclick="filterRegion('cn',this)">CN <span class="cnt" id="cntCn">0</span></button>
     <button type="button" class="ftag" data-region="global" onclick="filterRegion('global',this)">Global <span class="cnt" id="cntGlobal">0</span></button>
   </div>
-  <div class="summary" id="summaryBox" style="display:none"></div>
+  <div class="summary card" id="summaryBox" style="display:none"></div>
   <div id="grid" class="grid"><div class="loading">加载中…</div></div>
 </div>
 <div class="modal-mask" id="importModal" onclick="onImportMaskClick(event)">
