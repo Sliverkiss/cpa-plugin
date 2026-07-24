@@ -1814,6 +1814,8 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 				if isGlobalDomain(sa.Auth.Domain) {
 					acct["trial_claimed"] = hasTrialPack(cr)
 				}
+				// Also fetch plan so the badge updates on lazy load.
+				acct["plan"] = fetchPaymentType(sa)
 				// Update cache so subsequent dashboard loads see fresh data.
 				now := time.Now()
 				if cr != nil {
