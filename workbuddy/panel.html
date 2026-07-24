@@ -192,6 +192,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <button type="button" class="ftag active" data-region="all" onclick="filterRegion('all',this)">全部 <span class="cnt" id="cntAll">0</span></button>
     <button type="button" class="ftag" data-region="cn" onclick="filterRegion('cn',this)">CN <span class="cnt" id="cntCn">0</span></button>
     <button type="button" class="ftag" data-region="global" onclick="filterRegion('global',this)">Global <span class="cnt" id="cntGlobal">0</span></button>
+    <button type="button" class="ftag" data-region="exhausted" onclick="filterRegion('exhausted',this)">耗尽 <span class="cnt" id="cntExhausted">0</span></button>
   </div>
   <div class="summary card" id="summaryBox" style="display:none"></div>
   <div id="grid" class="grid"><div class="loading">加载中…</div></div>
@@ -417,25 +418,35 @@ function filterRegion(region, btn){
   }
   document.querySelectorAll("#grid .card").forEach(c=>{
     const r=c.dataset.region||"cn";
-    c.style.display=(currentFilter==="all"||r===currentFilter)?"":"none";
+    let show=true;
+    if(currentFilter==="all") show=true;
+    else if(currentFilter==="exhausted") show=c.querySelector(".badge.exhausted")!=null;
+    else show=r===currentFilter;
+    c.style.display=show?"":"none";
   });
   renderSummary(lastAccounts);
 }
 function updateFilterCounts(accounts){
-  let cn=0, gl=0;
+  let cn=0, gl=0, ex=0;
   (accounts||[]).forEach(a=>{
     if((a.region||"cn")==="global") gl++; else cn++;
+    if(a.exhausted||(a.credits&&a.credits.total_remain===0&&(a.credits.total_used>0||(a.credits.packages&&a.credits.packages.length)))) ex++;
   });
   const elAll=document.getElementById("cntAll");
   const elCn=document.getElementById("cntCn");
   const elGl=document.getElementById("cntGlobal");
+  const elEx=document.getElementById("cntExhausted");
   if(elAll) elAll.textContent=String((accounts||[]).length);
   if(elCn) elCn.textContent=String(cn);
   if(elGl) elGl.textContent=String(gl);
+  if(elEx) elEx.textContent=String(ex);
 }
 function accountsForFilter(accounts){
   const list=accounts||[];
   if(currentFilter==="all") return list;
+  if(currentFilter==="exhausted"){
+    return list.filter(a=>a.exhausted||(a.credits&&a.credits.total_remain===0&&(a.credits.total_used>0||(a.credits.packages&&a.credits.packages.length))));
+  }
   return list.filter(a=>(a.region||"cn")===currentFilter);
 }
 function creditOf(a){

@@ -101,7 +101,8 @@ func TestSchedulerPick_PrefersPanelSelection(t *testing.T) {
 
 func TestSchedulerPick_StaysOnExhaustedSelection(t *testing.T) {
 	resetActiveAuth(t)
-	// Exhausted selection should NOT auto-switch — lifecycle handles disable.
+	// When selected is exhausted AND a non-exhausted candidate exists,
+	// it should switch to the non-exhausted one and update activeAuthID.
 	accountCache.Store("wb-exhausted", &accountCacheEntry{
 		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 500, TotalSize: 500},
 	})
@@ -124,12 +125,42 @@ func TestSchedulerPick_StaysOnExhaustedSelection(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	resp := parsePickResponse(t, raw)
-	// Should stay on exhausted selection — not silently switch.
-	if !resp.Handled || resp.AuthID != "wb-exhausted" {
-		t.Fatalf("want stay on wb-exhausted (sticky), got %+v", resp)
+	if !resp.Handled || resp.AuthID != "wb-ok" {
+		t.Fatalf("want switch to wb-ok, got %+v", resp)
 	}
-	if getActiveAuthID() != "wb-exhausted" {
-		t.Fatalf("active should not have changed, got %q", getActiveAuthID())
+	if getActiveAuthID() != "wb-ok" {
+		t.Fatalf("active should update to wb-ok, got %q", getActiveAuthID())
+	}
+}
+
+func TestSchedulerPick_AllExhausted_KeepsCurrent(t *testing.T) {
+	resetActiveAuth(t)
+	// When ALL candidates are exhausted, keep current selection rather than
+	// flip-flopping between exhausted accounts.
+	accountCache.Store("wb-a", &accountCacheEntry{
+		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 100, TotalSize: 100},
+	})
+	accountCache.Store("wb-b", &accountCacheEntry{
+		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 200, TotalSize: 200},
+	})
+	defer func() {
+		accountCache.Delete("wb-a")
+		accountCache.Delete("wb-b")
+	}()
+	setActiveAuthID("wb-a")
+	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
+		Provider: providerName,
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "wb-a", Provider: providerName},
+			{ID: "wb-b", Provider: providerName},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	resp := parsePickResponse(t, raw)
+	if !resp.Handled || resp.AuthID != "wb-a" {
+		t.Fatalf("want stay on wb-a (all exhausted), got %+v", resp)
 	}
 }
 
