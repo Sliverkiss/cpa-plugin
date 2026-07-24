@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.25
+
+### Fixed
+- 选中账号 sticky：scheduler 不会因缓存过期/积分耗尽自动切换到别的账号
+  只有 host 把选中账号从候选列表移除（disabled/deleted）才切换
+  修复面板显示选中A但实际路由到B、静默消耗积分的问题
+
 ## 0.6.24
 
 ### Fixed

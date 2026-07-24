@@ -99,8 +99,9 @@ func TestSchedulerPick_PrefersPanelSelection(t *testing.T) {
 	}
 }
 
-func TestSchedulerPick_SwitchesWhenActiveExhausted(t *testing.T) {
+func TestSchedulerPick_StaysOnExhaustedSelection(t *testing.T) {
 	resetActiveAuth(t)
+	// Exhausted selection should NOT auto-switch — lifecycle handles disable.
 	accountCache.Store("wb-exhausted", &accountCacheEntry{
 		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 500, TotalSize: 500},
 	})
@@ -116,6 +117,33 @@ func TestSchedulerPick_SwitchesWhenActiveExhausted(t *testing.T) {
 		Provider: providerName,
 		Candidates: []pluginapi.SchedulerAuthCandidate{
 			{ID: "wb-exhausted", Provider: providerName},
+			{ID: "wb-ok", Provider: providerName},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	resp := parsePickResponse(t, raw)
+	// Should stay on exhausted selection — not silently switch.
+	if !resp.Handled || resp.AuthID != "wb-exhausted" {
+		t.Fatalf("want stay on wb-exhausted (sticky), got %+v", resp)
+	}
+	if getActiveAuthID() != "wb-exhausted" {
+		t.Fatalf("active should not have changed, got %q", getActiveAuthID())
+	}
+}
+
+func TestSchedulerPick_SwitchesOnlyWhenSelectionGone(t *testing.T) {
+	resetActiveAuth(t)
+	accountCache.Store("wb-ok", &accountCacheEntry{
+		credits: &creditsSummary{TotalRemain: 300, TotalUsed: 0, TotalSize: 300},
+	})
+	defer accountCache.Delete("wb-ok")
+	// Selected auth is NOT in candidates (host disabled it) → should switch.
+	setActiveAuthID("wb-gone")
+	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
+		Provider: providerName,
+		Candidates: []pluginapi.SchedulerAuthCandidate{
 			{ID: "wb-ok", Provider: providerName},
 		},
 	}))

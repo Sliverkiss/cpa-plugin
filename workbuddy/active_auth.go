@@ -7,7 +7,6 @@
 package main
 
 import (
-	"math/rand"
 	"strings"
 	"sync"
 )
@@ -51,39 +50,45 @@ type activeAuthCandidate struct {
 }
 
 // pickActiveAuth chooses which workbuddy auth to use from host candidates.
-// Preference: current selection if still viable → else random non-exhausted →
-// else first candidate. Updates activeAuthID when it changes.
+// The panel selection is sticky: it stays on the current account unless that
+// account is no longer in the candidate list (disabled/deleted by host).
+// This prevents silent drift between what the panel shows as selected and
+// what the scheduler actually routes to.
+//
+// Exhausted accounts are NOT auto-switched — the panel shows the real
+// selected card, and lifecycle (lifecycle.go) handles disable/delete when
+// credits are truly gone. Only when the host removes the auth from
+// candidates (disabled) do we fall back to the first available.
 func pickActiveAuth(candidates []activeAuthCandidate) string {
 	if len(candidates) == 0 {
 		return ""
 	}
 	byID := make(map[string]activeAuthCandidate, len(candidates))
-	var viable []activeAuthCandidate
 	for _, c := range candidates {
 		byID[c.ID] = c
-		if c.Disabled || c.Exhausted {
-			continue
-		}
-		viable = append(viable, c)
 	}
 
 	cur := getActiveAuthID()
+	// If current selection is still a live candidate, keep it — even if
+	// exhausted. The panel shows this card as selected and lifecycle will
+	// handle disable when appropriate.
 	if cur != "" {
-		if c, ok := byID[cur]; ok && !c.Disabled && !c.Exhausted {
+		if _, ok := byID[cur]; ok {
 			return cur
 		}
 	}
 
-	// Active missing/disabled/exhausted → pick next.
+	// Current selection is gone (disabled/deleted by host) — pick first
+	// non-exhausted candidate, else first candidate. Update activeAuthID
+	// so the panel can reflect the change on next dashboard load.
 	var next string
-	if len(viable) > 0 {
-		next = viable[rand.Intn(len(viable))].ID
-	} else {
-		if cur != "" {
-			if _, ok := byID[cur]; ok {
-				return cur
-			}
+	for _, c := range candidates {
+		if !c.Exhausted {
+			next = c.ID
+			break
 		}
+	}
+	if next == "" {
 		next = candidates[0].ID
 	}
 	if next != "" && next != cur {
