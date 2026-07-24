@@ -216,6 +216,7 @@ type wbAccount struct {
 	Status       string          `json:"status"`
 	Disabled     bool            `json:"disabled"`
 	Exhausted    bool            `json:"exhausted"`
+	Selected     bool            `json:"selected"` // panel active routing card
 	Credits      *creditsSummary `json:"credits,omitempty"`
 	Checkin      *checkinSummary `json:"checkin,omitempty"`
 	TrialClaimed bool            `json:"trial_claimed,omitempty"` // Global: expert trial already claimed
@@ -1010,10 +1011,17 @@ func buildDashboard(force bool) map[string]any {
 	checkinAutoMu.RLock()
 	auto := checkinAuto
 	checkinAutoMu.RUnlock()
+	// Ensure default selection for panel + scheduler (first usable card).
+	activeID := ensureDefaultActiveAuth(out)
 	// Aggregate credits for panel/API consumers (all accounts currently in out).
 	sum := summarizeCredits(out)
+	// Mark selected account in list for UI.
+	for i := range out {
+		out[i].Selected = out[i].AuthIndex == activeID
+	}
 	resp := map[string]any{
 		"accounts":       out,
+		"active_auth":    activeID,
 		"checkin_auto":   auto,
 		"lifecycle_auto": lifecycleEnabled(),
 		"schedule":       []string{"09:00", "21:00"},
@@ -1214,7 +1222,8 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/checkin/config", Description: "Toggle auto check-in (enabled: true/false)."},
 			{Method: http.MethodGet, Path: base + "/credits", Description: "Get real-time credits for one (auth_index query) or all accounts."},
 			{Method: http.MethodPost, Path: base + "/import", Description: "Import WorkBuddy credential JSON (nested or flat) into host auth store."},
-		{Method: http.MethodPost, Path: base + "/trial", Description: "Claim expert trial pack for one Global account (auth_index). One-time 250 credits / 14 days."},
+			{Method: http.MethodPost, Path: base + "/trial", Description: "Claim expert trial pack for one Global account (auth_index). One-time 250 credits / 14 days."},
+			{Method: http.MethodPost, Path: base + "/select", Description: "Select the active account card used for chat routing (body: {auth_index})."},
 		},
 		Resources: []resourceRoute{
 			{Path: "/panel", Menu: "WorkBuddy", Description: "WorkBuddy dashboard: credits, check-in, plan, import."},
@@ -1252,6 +1261,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleImportAuth(req)))
 	case req.Method == http.MethodPost && path == base+"/trial":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleClaimTrial(req)))
+	case req.Method == http.MethodPost && path == base+"/select":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleSelectAuth(req)))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
@@ -1694,6 +1705,44 @@ func handleClaimTrial(req pluginapi.ManagementRequest) map[string]any {
 		return out
 	}
 	return map[string]any{"error": "account not found"}
+}
+
+// handleSelectAuth sets the panel-selected account used for chat routing.
+// Region (CN/Global) is read from that account's stored domain on each request.
+func handleSelectAuth(req pluginapi.ManagementRequest) map[string]any {
+	var body struct {
+		AuthIndex string `json:"auth_index"`
+	}
+	_ = json.Unmarshal(req.Body, &body)
+	authIndex := strings.TrimSpace(body.AuthIndex)
+	if authIndex == "" {
+		return map[string]any{"error": "auth_index is required", "active_auth": getActiveAuthID()}
+	}
+	files, err := hostAuthList()
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	for _, f := range files {
+		if f.AuthIndex != authIndex {
+			continue
+		}
+		if f.Disabled {
+			return map[string]any{"error": "账号已禁用，无法选中", "auth_index": authIndex}
+		}
+		sa, err := hostAuthGet(f.AuthIndex)
+		if err != nil {
+			return map[string]any{"error": err.Error(), "auth_index": authIndex}
+		}
+		setActiveAuthID(authIndex)
+		return map[string]any{
+			"ok":          true,
+			"active_auth": authIndex,
+			"region":      accountRegion(sa),
+			"nickname":    sa.Account.Nickname,
+			"uid":         sa.Account.UID,
+		}
+	}
+	return map[string]any{"error": "account not found", "auth_index": authIndex}
 }
 
 // handleCreditsQuery returns real-time credits for one or all accounts.

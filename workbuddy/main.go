@@ -61,6 +61,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -82,16 +83,23 @@ const (
 	providerName  = "workbuddy"
 	authFileName  = "workbuddy.json"
 	pluginLogoURL = "https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png"
-	upstreamBase  = "https://copilot.tencent.com"
-	clientUA      = "CLI/2.63.2 CodeBuddy/2.63.2"
-	originReferer = "https://www.codebuddy.cn"
+	// CN chat/auth gateway (iss = codebuddy.cn realm).
+	upstreamBaseCN = "https://copilot.tencent.com"
+	// Global chat/auth gateway (iss = workbuddy.ai realm). APISIX on
+	// copilot.tencent.com rejects Global JWTs with 401; must use workbuddy.ai.
+	upstreamBaseGlobal = "https://www.workbuddy.ai"
+	clientUA           = "CLI/2.63.2 CodeBuddy/2.63.2"
+	originReferer      = "https://www.codebuddy.cn"
+	originRefererGlobal = "https://www.workbuddy.ai"
 
-	endpointAuthState    = upstreamBase + "/v2/plugin/auth/state?platform=CLI"
-	endpointLoginAcct    = upstreamBase + "/v2/plugin/login/account?state="
-	endpointAuthToken    = upstreamBase + "/v2/plugin/auth/token?state="
-	endpointTokenRefresh = upstreamBase + "/v2/plugin/auth/token/refresh"
-	endpointChat         = upstreamBase + "/v2/chat/completions"
-	endpointModels       = upstreamBase + "/console/enterprises/personal/models"
+	// Legacy aliases used by CN login defaults / tests.
+	upstreamBase  = upstreamBaseCN
+	endpointAuthState    = upstreamBaseCN + "/v2/plugin/auth/state?platform=CLI"
+	endpointLoginAcct    = upstreamBaseCN + "/v2/plugin/login/account?state="
+	endpointAuthToken    = upstreamBaseCN + "/v2/plugin/auth/token?state="
+	endpointTokenRefresh = upstreamBaseCN + "/v2/plugin/auth/token/refresh"
+	endpointChat         = upstreamBaseCN + "/v2/chat/completions"
+	endpointModels       = upstreamBaseCN + "/console/enterprises/personal/models"
 
 	loginTTL = 5 * time.Minute
 )
@@ -343,7 +351,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.6.13"
+var version = "0.6.15"
 
 func wbRegistration() registration {
 	return registration{
@@ -489,18 +497,56 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 	return fetchDynamicModels()
 }
 
+// realmFromToken decodes the JWT iss claim to determine the account realm.
+// Global tokens have iss=...workbuddy.ai...; CN tokens have iss=...codebuddy.cn...
+// Returns true if the token is Global.
+func isGlobalToken(accessToken string) bool {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	payload := parts[1]
+	// base64url padding
+	if pad := len(payload) % 4; pad != 0 {
+		payload += strings.Repeat("=", 4-pad)
+	}
+	raw, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		ISS string `json:"iss"`
+	}
+	if json.Unmarshal(raw, &claims) != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(claims.ISS), "workbuddy.ai")
+}
+
 // callModelsAPI GETs /console/enterprises/personal/models from the upstream.
 // Uses the shared client (connection pooling) with a per-request 15s budget;
 // the shared client's own 120s timeout stays as the outer bound.
 func callModelsAPI(accessToken string) ([]pluginapi.ModelInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointModels, nil)
+	// Model discovery is per-realm: Global tokens must query workbuddy.ai,
+	// not copilot.tencent.com (which 500s for Global tokens). Decode JWT iss.
+	isGlobal := isGlobalToken(accessToken)
+	modelsURL := endpointModels
+	origin := originReferer
+	if isGlobal {
+		modelsURL = upstreamBaseGlobal + "/console/enterprises/personal/models"
+		origin = originRefererGlobal
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("User-Agent", clientUA)
 	resp, err := sharedHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
@@ -1155,9 +1201,31 @@ func commonHeaders(req *http.Request) {
 // legacy auth files with empty domain) use the default https://www.codebuddy.cn.
 func originRefererFor(sa *storedAuth) string {
 	if sa != nil && isGlobalDomain(sa.Auth.Domain) {
-		return "https://www.workbuddy.ai"
+		return originRefererGlobal
 	}
 	return originReferer
+}
+
+// upstreamBaseFor returns the chat/auth API host for the account realm.
+// Global JWT iss is workbuddy.ai — those tokens only work on www.workbuddy.ai.
+// CN tokens work on copilot.tencent.com. Mixing them yields APISIX 401.
+func upstreamBaseFor(sa *storedAuth) string {
+	if sa != nil && isGlobalDomain(sa.Auth.Domain) {
+		return upstreamBaseGlobal
+	}
+	return upstreamBaseCN
+}
+
+func endpointChatFor(sa *storedAuth) string {
+	return upstreamBaseFor(sa) + "/v2/chat/completions"
+}
+
+func endpointTokenRefreshFor(sa *storedAuth) string {
+	return upstreamBaseFor(sa) + "/v2/plugin/auth/token/refresh"
+}
+
+func endpointModelsFor(sa *storedAuth) string {
+	return upstreamBaseFor(sa) + "/console/enterprises/personal/models"
 }
 
 // backendHeaders applies auth-derived headers to a chat completion request.
@@ -1436,7 +1504,7 @@ func handleRefreshAuth(raw []byte) ([]byte, error) {
 		}
 		r.Header.Set("X-Auth-Refresh-Source", providerName)
 	}
-	data, status, err := doJSON(sharedHTTPClient(), http.MethodPost, endpointTokenRefresh, headers, nil)
+	data, status, err := doJSON(sharedHTTPClient(), http.MethodPost, endpointTokenRefreshFor(sa), headers, nil)
 	if err != nil {
 		if status >= 400 {
 			return nil, fmt.Errorf("refresh rejected (HTTP %d)", status)
@@ -1491,7 +1559,8 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	// Normalize OpenAI tool_choice/tools before rewrite — upstream only accepts
 	// string tool_choice, and ignores "none" when tools[] is present.
 	body := rewriteModelInBody(normalizeToolsForUpstream(rewriteSystemForUpstream(forceStreamBody(req.Payload, req.OriginalRequest))), upstreamModel)
-	httpReq, err := http.NewRequest(http.MethodPost, endpointChat, bytes.NewReader(body))
+	body = ensureSystemMessage(body, sa)
+	httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -1546,6 +1615,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		body = req.OriginalRequest
 	}
 	body = rewriteModelInBody(normalizeToolsForUpstream(rewriteSystemForUpstream(body)), upstreamModel)
+	body = ensureSystemMessage(body, sa)
 
 	headers := streamHeaders()
 	sseFramed := clientNeedsSSEFrame(req.Metadata)
@@ -1565,7 +1635,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 
 	// Async: return immediately with empty chunks. A goroutine pumps the upstream
 	// and emits each chunk via host.stream.emit so the client sees true streaming.
-	httpReq, err := http.NewRequest(http.MethodPost, endpointChat, bytes.NewReader(body))
+	httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
 	if err != nil {
 		streamEmitError(req.StreamID, err.Error())
 		streamClose(req.StreamID)
@@ -1654,7 +1724,7 @@ func pumpUpstreamStream(httpReq *http.Request, streamID string, sseFramed bool, 
 // non-nil, observes raw upstream chunks for usage extraction. statusCode is the
 // upstream HTTP status (0 for transport-level failures).
 func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, int, error) {
-	httpReq, err := http.NewRequest(http.MethodPost, endpointChat, bytes.NewReader(body))
+	httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1957,6 +2027,48 @@ func rewriteSystemForUpstream(payload []byte) []byte {
 	if !changed {
 		return payload
 	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return payload
+	}
+	return out
+}
+
+// ensureSystemMessage injects a minimal system message if none is present.
+// Global (www.workbuddy.ai) rejects user-only requests with code 11101
+// "Parse message failed: 11101:invalid request". CN (copilot.tencent.com)
+// does not require a system message but tolerates one. Inserting a
+// harmless system message unifies both paths.
+func ensureSystemMessage(payload []byte, sa *storedAuth) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	// Only inject for Global; CN doesn't need it and we minimize diff.
+	if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
+		return payload
+	}
+	var obj map[string]any
+	if json.Unmarshal(payload, &obj) != nil {
+		return payload
+	}
+	messages, ok := obj["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return payload
+	}
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); strings.EqualFold(role, "system") {
+			return payload // already has system message
+		}
+	}
+	systemMsg := map[string]any{
+		"role":    "system",
+		"content": "You are a helpful assistant.",
+	}
+	obj["messages"] = append([]any{systemMsg}, messages...)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return payload

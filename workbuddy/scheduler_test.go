@@ -19,7 +19,7 @@ func mustMarshal(t *testing.T, v any) []byte {
 func parsePickResponse(t *testing.T, raw []byte) pluginapi.SchedulerPickResponse {
 	t.Helper()
 	var env struct {
-		OK     bool                       `json:"ok"`
+		OK     bool                           `json:"ok"`
 		Result pluginapi.SchedulerPickResponse `json:"result"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -31,27 +31,14 @@ func parsePickResponse(t *testing.T, raw []byte) pluginapi.SchedulerPickResponse
 	return env.Result
 }
 
-func TestSchedulerPick_OffMode_Defers(t *testing.T) {
-	restore := setSchedulerMode(schedulerModeOff)
-	defer restore()
-	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
-		Provider: providerName,
-		Candidates: []pluginapi.SchedulerAuthCandidate{
-			{ID: "wb-1", Provider: providerName},
-		},
-	}))
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	resp := parsePickResponse(t, raw)
-	if resp.Handled {
-		t.Fatal("off mode should defer")
-	}
+func resetActiveAuth(t *testing.T) {
+	t.Helper()
+	setActiveAuthID("")
+	t.Cleanup(func() { setActiveAuthID("") })
 }
 
 func TestSchedulerPick_NonWorkbuddy_Defers(t *testing.T) {
-	restore := setSchedulerMode(schedulerModeCredits)
-	defer restore()
+	resetActiveAuth(t)
 	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
 		Provider: "other",
 		Candidates: []pluginapi.SchedulerAuthCandidate{
@@ -68,8 +55,7 @@ func TestSchedulerPick_NonWorkbuddy_Defers(t *testing.T) {
 }
 
 func TestSchedulerPick_SingleCandidate_PicksIt(t *testing.T) {
-	restore := setSchedulerMode(schedulerModeCredits)
-	defer restore()
+	resetActiveAuth(t)
 	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
 		Provider: providerName,
 		Candidates: []pluginapi.SchedulerAuthCandidate{
@@ -83,44 +69,20 @@ func TestSchedulerPick_SingleCandidate_PicksIt(t *testing.T) {
 	if !resp.Handled || resp.AuthID != "wb-only" {
 		t.Fatalf("want wb-only handled, got %+v", resp)
 	}
+	if getActiveAuthID() != "wb-only" {
+		t.Fatalf("active auth should stick to wb-only, got %q", getActiveAuthID())
+	}
 }
 
-func TestSchedulerPick_CreditsMode_PicksHigherRemain(t *testing.T) {
-	// Seed accountCache with two entries: wb-low (remain 100) and wb-high (remain 500).
-	accountCache.Store("wb-low", &accountCacheEntry{
-		credits: &creditsSummary{TotalRemain: 100},
-	})
-	accountCache.Store("wb-high", &accountCacheEntry{
-		credits: &creditsSummary{TotalRemain: 500},
-	})
+func TestSchedulerPick_PrefersPanelSelection(t *testing.T) {
+	resetActiveAuth(t)
+	accountCache.Store("wb-a", &accountCacheEntry{credits: &creditsSummary{TotalRemain: 10, TotalSize: 10}})
+	accountCache.Store("wb-b", &accountCacheEntry{credits: &creditsSummary{TotalRemain: 500, TotalSize: 500}})
 	defer func() {
-		accountCache.Delete("wb-low")
-		accountCache.Delete("wb-high")
+		accountCache.Delete("wb-a")
+		accountCache.Delete("wb-b")
 	}()
-
-	restore := setSchedulerMode(schedulerModeCredits)
-	defer restore()
-	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
-		Provider: providerName,
-		Candidates: []pluginapi.SchedulerAuthCandidate{
-			{ID: "wb-low", Provider: providerName},
-			{ID: "wb-high", Provider: providerName},
-		},
-	}))
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	resp := parsePickResponse(t, raw)
-	if !resp.Handled || resp.AuthID != "wb-high" {
-		t.Fatalf("want wb-high (remain 500), got %+v", resp)
-	}
-}
-
-func TestSchedulerPick_CreditsMode_NoCache_StillPicks(t *testing.T) {
-	// No cache entries — remain defaults to -1 for both, sort is stable,
-	// should still pick the first candidate (not crash, not defer).
-	restore := setSchedulerMode(schedulerModeCredits)
-	defer restore()
+	setActiveAuthID("wb-a")
 	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
 		Provider: providerName,
 		Candidates: []pluginapi.SchedulerAuthCandidate{
@@ -132,13 +94,13 @@ func TestSchedulerPick_CreditsMode_NoCache_StillPicks(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	resp := parsePickResponse(t, raw)
-	if !resp.Handled {
-		t.Fatal("should still handle when no cache (stable sort picks first)")
+	if !resp.Handled || resp.AuthID != "wb-a" {
+		t.Fatalf("want panel selection wb-a, got %+v", resp)
 	}
 }
 
-func TestSchedulerPick_CreditsMode_SkipsExhausted(t *testing.T) {
-	// wb-exhausted has remain=0 used>0, wb-ok has remain=300 → should pick wb-ok.
+func TestSchedulerPick_SwitchesWhenActiveExhausted(t *testing.T) {
+	resetActiveAuth(t)
 	accountCache.Store("wb-exhausted", &accountCacheEntry{
 		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 500, TotalSize: 500},
 	})
@@ -149,9 +111,7 @@ func TestSchedulerPick_CreditsMode_SkipsExhausted(t *testing.T) {
 		accountCache.Delete("wb-exhausted")
 		accountCache.Delete("wb-ok")
 	}()
-
-	restore := setSchedulerMode(schedulerModeCredits)
-	defer restore()
+	setActiveAuthID("wb-exhausted")
 	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
 		Provider: providerName,
 		Candidates: []pluginapi.SchedulerAuthCandidate{
@@ -164,15 +124,17 @@ func TestSchedulerPick_CreditsMode_SkipsExhausted(t *testing.T) {
 	}
 	resp := parsePickResponse(t, raw)
 	if !resp.Handled || resp.AuthID != "wb-ok" {
-		t.Fatalf("want wb-ok (remain 300 > 0), got %+v", resp)
+		t.Fatalf("want switch to wb-ok, got %+v", resp)
+	}
+	if getActiveAuthID() != "wb-ok" {
+		t.Fatalf("active should update to wb-ok, got %q", getActiveAuthID())
 	}
 }
 
 func TestSchedulerPick_SkipsDisabledCandidates(t *testing.T) {
-	restore := setSchedulerMode(schedulerModeCredits)
-	defer restore()
+	resetActiveAuth(t)
 	accountCache.Store("wb-live", &accountCacheEntry{
-		credits: &creditsSummary{TotalRemain: 50},
+		credits: &creditsSummary{TotalRemain: 50, TotalSize: 50},
 	})
 	defer accountCache.Delete("wb-live")
 	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
@@ -214,5 +176,28 @@ func TestCandidateDisabled(t *testing.T) {
 	}
 	if candidateDisabled(pluginapi.SchedulerAuthCandidate{Status: "active"}) {
 		t.Fatal("active should not be disabled")
+	}
+}
+
+func TestEnsureDefaultActiveAuth(t *testing.T) {
+	resetActiveAuth(t)
+	id := ensureDefaultActiveAuth([]wbAccount{
+		{AuthIndex: "a1", Disabled: true},
+		{AuthIndex: "a2", Exhausted: false},
+		{AuthIndex: "a3"},
+	})
+	if id != "a2" {
+		t.Fatalf("want first ready a2, got %q", id)
+	}
+	if getActiveAuthID() != "a2" {
+		t.Fatalf("stuck active %q", getActiveAuthID())
+	}
+	// Already set + still live → keep
+	id2 := ensureDefaultActiveAuth([]wbAccount{
+		{AuthIndex: "a2"},
+		{AuthIndex: "a3"},
+	})
+	if id2 != "a2" {
+		t.Fatalf("should keep a2, got %q", id2)
 	}
 }

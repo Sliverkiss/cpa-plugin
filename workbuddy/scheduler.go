@@ -1,20 +1,21 @@
 // scheduler.go implements the CPA scheduler.pick capability for workbuddy.
 //
-// When scheduler_mode is "off" (default), the plugin defers to the built-in
-// scheduler so existing fill-first/round-robin behaviour is unchanged.
-// When "credits", it picks the workbuddy candidate with the highest cached
-// credit balance (TotalRemain). Non-workbuddy candidates are always deferred.
+// Routing uses the panel-selected active account (region from that card's
+// domain). When the selection is exhausted/disabled/missing, randomly switch
+// to another non-exhausted workbuddy candidate. Non-workbuddy candidates are
+// always deferred so the built-in scheduler handles them.
 package main
 
 import (
 	"encoding/json"
-	"sort"
 	"strings"
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+// Legacy config values kept for configure() compatibility; pick always uses
+// panel active-auth selection now (not credit-max ranking).
 const (
 	schedulerModeOff     = "off"
 	schedulerModeCredits = "credits"
@@ -45,7 +46,7 @@ func loadedSchedulerMode() string {
 }
 
 // handleSchedulerPick selects a workbuddy auth candidate based on the
-// configured scheduler_mode. Non-workbuddy candidates are always deferred
+// panel-selected active account. Non-workbuddy candidates are always deferred
 // (Handled: false) so the built-in scheduler handles them.
 func handleSchedulerPick(raw []byte) ([]byte, error) {
 	var req pluginapi.SchedulerPickRequest
@@ -53,18 +54,12 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	mode := loadedSchedulerMode()
-	if mode == schedulerModeOff {
-		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
-	}
-
-	// Collect workbuddy candidates only; skip disabled/exhausted when alternatives exist.
+	// Collect workbuddy candidates only.
 	var wbCandidates []pluginapi.SchedulerAuthCandidate
 	for _, c := range req.Candidates {
 		if c.Provider != providerName {
 			continue
 		}
-		// Host already marks operator-disabled auths; never re-select them.
 		if candidateDisabled(c) {
 			continue
 		}
@@ -74,41 +69,24 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
 
-	// Prefer non-exhausted; if all exhausted still pick one (host may disable later).
-	if mode == schedulerModeCredits {
-		type scored struct {
-			candidate pluginapi.SchedulerAuthCandidate
-			remain    int64
-			exhausted bool
-		}
-		items := make([]scored, 0, len(wbCandidates))
-		for _, c := range wbCandidates {
-			remain, exhausted := cachedCreditsScore(c.ID)
-			items = append(items, scored{candidate: c, remain: remain, exhausted: exhausted})
-		}
-		sort.SliceStable(items, func(i, j int) bool {
-			if items[i].exhausted != items[j].exhausted {
-				return !items[i].exhausted // non-exhausted first
-			}
-			return items[i].remain > items[j].remain
-		})
-		// If top is exhausted but a non-exhausted exists, sort already handled it.
-		return okEnvelope(pluginapi.SchedulerPickResponse{
-			AuthID:  items[0].candidate.ID,
-			Handled: true,
+	// Build thin view for active-auth picker.
+	cands := make([]activeAuthCandidate, 0, len(wbCandidates))
+	for _, c := range wbCandidates {
+		_, exhausted := cachedCreditsScore(c.ID)
+		cands = append(cands, activeAuthCandidate{
+			ID:        c.ID,
+			Disabled:  false, // already filtered
+			Exhausted: exhausted,
 		})
 	}
-
-	// Single candidate or unknown mode handling:
-	if len(wbCandidates) == 1 {
-		return okEnvelope(pluginapi.SchedulerPickResponse{
-			AuthID:  wbCandidates[0].ID,
-			Handled: true,
-		})
+	picked := pickActiveAuth(cands)
+	if picked == "" {
+		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
-
-	// Unknown mode → defer.
-	return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
+	return okEnvelope(pluginapi.SchedulerPickResponse{
+		AuthID:  picked,
+		Handled: true,
+	})
 }
 
 // candidateDisabled reports host-disabled auth from Status/metadata.

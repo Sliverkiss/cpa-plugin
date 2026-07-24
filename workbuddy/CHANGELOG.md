@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.15
+
+### Added
+- 面板「选用」账号：默认第一张可用卡；选中卡决定 CN/Global 路由（读 domain，不解码 JWT）
+- 选中账号耗尽/禁用/消失时随机切换下一张可用卡并记住
+
+### Changed
+- scheduler.pick 改为始终跟随 active 选中账号（不再依赖 credits 排行模式）
+
+## 0.6.14
+
+### Fixed
+- Global 账号聊天 401/400 修复：JWT iss=workbuddy.ai 必须走 www.workbuddy.ai 端点（copilot.tencent.com 会对 Global token 返回 401）
+- Global 请求自动注入 system message（www.workbuddy.ai 对 user-only 请求返回 code 11101）
+- token 刷新和 models 发现也走域名感知端点
+
 ## 0.6.13
 
 ### Changed

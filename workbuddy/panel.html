@@ -52,6 +52,7 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .toggle{display:flex;gap:8px;align-items:center;color:var(--mut);font-size:13px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+.card.selected{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-ring)}
 .card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center}
 .uid{color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:12px}
 .badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:99px;background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border)}
@@ -318,6 +319,7 @@ function card(a){
   const region=a.region||"cn";
   const isGlobal=region==="global";
   const disabled=!!a.disabled;
+  const selected=!!a.selected||(a.auth_index&&a.auth_index===activeAuthId);
   const regionBadge=`<span class="badge ${region}">${isGlobal?"Global":"CN"}</span>`;
   // CN: 签到 button; Global: 领取专家加油包 button (or 已领取 if trial_claimed)
   let actionHTML;
@@ -334,17 +336,21 @@ function card(a){
     const btnDisabled=checked?" disabled=\"disabled\"":"";
     actionHTML=`<button class="${btnClass}" onclick="checkin('${esc(a.auth_index)}',this)"${btnDisabled}>${btnText}</button>`;
   }
-  const badges=(disabled?`<span class="badge disabled">已禁用</span>`:"")+(exhausted?`<span class="badge exhausted">耗尽</span>`:"")+regionBadge+`<span class="badge ${plan}">${esc(a.plan||"-")}</span>`;
-  return `<div class="card" data-region="${region}">
+  const selectBtn=selected
+    ? `<button class="done" disabled="disabled">使用中</button>`
+    : (disabled?``:`<button class="sec" onclick="selectAuth('${esc(a.auth_index)}',this)">选用</button>`);
+  const badges=(selected?`<span class="badge" style="background:var(--acc-ring);color:var(--acc);border-color:var(--acc)">使用中</span>`:"")+(disabled?`<span class="badge disabled">已禁用</span>`:"")+(exhausted?`<span class="badge exhausted">耗尽</span>`:"")+regionBadge+`<span class="badge ${plan}">${esc(a.plan||"-")}</span>`;
+  return `<div class="card${selected?" selected":""}" data-region="${region}" data-auth="${esc(a.auth_index)}">
   <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
   ${progressHTML(cr)}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
-  <div class="actions">${actionHTML}</div>
+  <div class="actions">${selectBtn}${actionHTML}</div>
   </div>`;
 }
 let currentFilter="all";
 let lastAccounts=[];
+let activeAuthId="";
 let authFailCount=0;
 let authFailUntil=0;
 function filterRegion(region, btn){
@@ -518,6 +524,7 @@ async function load(force, btn){
     }
     const accounts=d.accounts||[];
     lastAccounts=accounts;
+    activeAuthId=d.active_auth||"";
     updateFilterCounts(accounts);
     if(!accounts.length){
       g.innerHTML='<div class="loading">暂无 WorkBuddy 账号</div>';
@@ -589,6 +596,30 @@ async function checkin(idx, btn){
     await load(false);
   }catch(e){
     toast("签到请求失败","err",e.message);
+    busy(btn,false);
+  }
+}
+async function selectAuth(idx, btn){
+  busy(btn,true);
+  try{
+    const d=await api("/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
+    if(d.error){
+      toast("选用失败","err",d.error);
+      busy(btn,false);
+      return;
+    }
+    activeAuthId=d.active_auth||idx;
+    const who=d.nickname||idx;
+    const region=d.region==="global"?"Global":"CN";
+    toast("已选用","ok",who+" · "+region);
+    // Re-render from local state for instant feedback, then soft reload
+    (lastAccounts||[]).forEach(a=>{a.selected=(a.auth_index===activeAuthId);});
+    const g=document.getElementById("grid");
+    if(g) g.innerHTML=accountsForFilter(lastAccounts).map(card).join("");
+    filterRegion(currentFilter, null);
+  }catch(e){
+    toast("选用失败","err",e.message||String(e));
+  }finally{
     busy(btn,false);
   }
 }
