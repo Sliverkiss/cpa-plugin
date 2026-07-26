@@ -181,6 +181,8 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     </div>
   </div>
   <div class="bar">
+    <button onclick="startOAuthLogin('cn',this)">登录 (CN)</button>
+    <button onclick="startOAuthLogin('global',this)">登录 (Global)</button>
     <button class="sec" id="importBtn" onclick="openImportModal()">导入凭证</button>
     <button id="refreshBtn" onclick="load(true,this)">刷新数据</button>
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
@@ -210,6 +212,25 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <div class="modal-ft">
       <button type="button" class="sec" onclick="closeImportModal()">取消</button>
       <button type="button" onclick="importAuth(this)">导入并保存</button>
+    </div>
+  </div>
+</div>
+<div class="modal-mask" id="loginModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="loginModalTitle">
+    <div class="modal-hd">
+      <h2 id="loginModalTitle">等待网页登录中...</h2>
+    </div>
+    <div class="modal-bd" style="text-align:center;padding:24px;">
+      <p style="margin:0 0 10px;">已在新窗口打开授权链接，请在登录完成后返回此页面。</p>
+      <div style="display:flex;gap:8px;margin:12px 0 16px;">
+        <input id="loginAuthUrlInput" type="text" readonly style="flex:1;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:12px;color:var(--fg);" onclick="this.select()">
+        <button class="sec" style="padding:8px 14px;font-size:12px;" onclick="copyLoginUrl()">复制链接</button>
+      </div>
+      <div style="margin:16px 0;font-size:14px;color:var(--warn);font-weight:600;" id="loginStatusText">正在检测登录状态...</div>
+      <p style="margin:0;"><a id="loginAuthLink" href="#" target="_blank" style="color:var(--acc);text-decoration:underline;font-weight:600;">若未自动打开，请点此手动打开登录链接</a></p>
+    </div>
+    <div class="modal-ft">
+      <button type="button" class="sec" onclick="cancelOAuthLogin()">取消登录</button>
     </div>
   </div>
 </div>
@@ -870,9 +891,120 @@ async function importAuth(btn){
   }catch(e){toast("导入请求失败","err",e.message)}
   busy(btn,false);
 }
+
+let pollTimer = null;
+let currentPollState = "";
+let currentPollRegion = "";
+
+function openLoginModal(authUrl) {
+  const m = document.getElementById("loginModal");
+  m.classList.add("show");
+  document.getElementById("loginStatusText").innerText = "正在等待浏览器登录...";
+  document.getElementById("loginAuthLink").href = authUrl;
+  document.getElementById("loginAuthUrlInput").value = authUrl;
+}
+
+function copyLoginUrl() {
+  const input = document.getElementById("loginAuthUrlInput");
+  input.select();
+  input.setSelectionRange(0, 99999);
+  try {
+    navigator.clipboard.writeText(input.value);
+    toast("链接已复制到剪贴板", "ok");
+  } catch (err) {
+    document.execCommand("copy");
+    toast("链接已复制", "ok");
+  }
+}
+
+function closeLoginModal() {
+  document.getElementById("loginModal").classList.remove("show");
+}
+
+function cancelOAuthLogin() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  closeLoginModal();
+  toast("登录已取消", "warn");
+}
+
+async function startOAuthLogin(region, btn) {
+  busy(btn, true);
+  try {
+    const d = await api("/oauth/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ region })
+    });
+    if (d.success) {
+      currentPollState = d.state;
+      currentPollRegion = region;
+      window.open(d.authUrl, "_blank");
+      openLoginModal(d.authUrl);
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(pollOAuthLogin, 3000);
+    } else {
+      toast("启动登录失败", "err", d.error || "unknown");
+    }
+  } catch (e) {
+    toast("登录请求失败", "err", e.message);
+  }
+  busy(btn, false);
+}
+
+async function pollOAuthLogin() {
+  if (!currentPollState) return;
+  try {
+    const d = await api("/oauth/poll?state=" + encodeURIComponent(currentPollState) + "&region=" + encodeURIComponent(currentPollRegion), {
+      method: "GET"
+    });
+    if (d.success) {
+      if (d.status === "success") {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        toast("登录成功！正在导入...", "ok");
+        try {
+          const imp = await api("/import", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ json: d.auth })
+          });
+          if (imp.success) {
+            toast("账号配置保存成功", "ok", (imp.nickname || imp.uid || "") + " → " + (imp.file || imp.name || ""));
+            closeLoginModal();
+            load(true);
+          } else {
+            document.getElementById("loginStatusText").innerText = "导入失败: " + (imp.error || "unknown");
+            toast("配置导入失败", "err", imp.error || "unknown");
+          }
+        } catch (e) {
+          document.getElementById("loginStatusText").innerText = "导入请求错误";
+          toast("导入请求失败", "err", e.message);
+        }
+      } else if (d.status === "pending") {
+        document.getElementById("loginStatusText").innerText = "正在等待浏览器登录...";
+      } else {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        document.getElementById("loginStatusText").innerText = d.error || "已过期";
+        toast("登录出错/已过期", "err", d.error || "expired");
+      }
+    } else {
+      document.getElementById("loginStatusText").innerText = d.error || "请求失败";
+    }
+  } catch (e) {
+    document.getElementById("loginStatusText").innerText = "网络连接错误";
+  }
+}
+
 document.getElementById("keyInput").addEventListener("keydown",e=>{if(e.key==="Enter")saveKey()});
 document.addEventListener("keydown",e=>{
-  if(e.key=="Escape"&&document.getElementById("importModal").classList.contains("show")) closeImportModal();
+  if(e.key=="Escape") {
+    if(document.getElementById("importModal").classList.contains("show")) closeImportModal();
+    if(document.getElementById("loginModal").classList.contains("show")) cancelOAuthLogin();
+  }
 });
 /* Start theme sync watcher (parent MutationObserver + standalone prefers-color-scheme listener). */
 if(window.__wbThemeSync)window.__wbThemeSync();

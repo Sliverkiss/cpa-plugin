@@ -22,6 +22,7 @@ func wbModels() []pluginapi.ModelInfo {
 		{ID: "glm-5.1", Name: "GLM-5.1", ContextLength: 131072, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "glm-5v-turbo", Name: "GLM-5V Turbo", ContextLength: 131072, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "kimi-k2.7", Name: "Kimi K2.7", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "kimi-k3", Name: "Kimi K3", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "minimax-m3", Name: "MiniMax M3", ContextLength: 204800, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "hy3", Name: "Hy3", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "hy3-preview", Name: "Hy3 Preview", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
@@ -51,30 +52,7 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 	if models, ok := cachedDynamicModels(); ok {
 		return models
 	}
-	models := wbModels()
-	files, err := hostAuthListFiles()
-	if err != nil || len(files) == 0 {
-		return models
-	}
-	for _, f := range files {
-		if !strings.Contains(strings.ToLower(f.Name), "workbuddy") && !strings.Contains(strings.ToLower(f.Name), "codebuddy") && !strings.EqualFold(f.Provider, "workbuddy") {
-			continue
-		}
-		raw, err := hostAuthGetByIndex(f.AuthIndex)
-		if err != nil {
-			continue
-		}
-		accessToken, ok := extractAccessToken(raw)
-		if !ok {
-			continue
-		}
-		dyn, err := callModelsAPI(accessToken)
-		if err == nil && len(dyn) > 0 {
-			storeDynamicModels(dyn)
-			return dyn
-		}
-	}
-	return models
+	return wbModels()
 }
 
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
@@ -88,7 +66,7 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 		}
 	}
 	if accessToken == "" {
-		return fetchDynamicModels()
+		return wbModels()
 	}
 	if dyn, err := callModelsAPI(accessToken); err == nil && len(dyn) > 0 {
 		storeDynamicModels(dyn)
@@ -429,10 +407,6 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
-	// Always return the plugin's canonical provider key. The host skips any
-	// response whose Provider doesn't match the auth's provider, so echoing
-	// req.AuthProvider back would silently drop the model list whenever the
-	// auth file carries a non-canonical provider string.
 	cacheModelAliases(req.Host)
 	models := fetchDynamicModelsFromStorage(req.StorageJSON)
 	models = filterExcludedModels(models, req.Host)

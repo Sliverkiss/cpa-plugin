@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -123,7 +124,11 @@ func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
 		_ = req.Body.Close()
 		bodyBytes = b
 	}
-	if !hostBridgeAvailable() {
+	// Windows stack movement mitigation: nested host calls during synchronous RPCs
+	// (such as model.for_auth or management.handle) cause the host stack to move,
+	// rendering the stack response pointer dangling and causing "unexpected end
+	// of JSON input". Bypass host bridge on Windows and make direct HTTP calls.
+	if !hostBridgeAvailable() || runtime.GOOS == "windows" {
 		return hostHTTPDoDirect(req, bodyBytes)
 	}
 	wire := rpcHostHTTPRequestWire{
