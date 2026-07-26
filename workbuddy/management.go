@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
@@ -153,6 +154,8 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/select", Description: "Select the active account card used for chat routing (body: {auth_index})."},
 			{Method: http.MethodPost, Path: base + "/keepalive", Description: "Manually refresh access tokens for all accounts (or one with auth_index)."},
 			{Method: http.MethodGet, Path: base + "/keepalive/status", Description: "Last keepalive run summary + config."},
+			{Method: http.MethodPost, Path: base + "/oauth/start", Description: "Start OAuth login flow for a region (CN or Global)."},
+			{Method: http.MethodGet, Path: base + "/oauth/poll", Description: "Poll OAuth login status for a state and region."},
 		},
 		Resources: []resourceRoute{
 			{Path: "/panel", Menu: "WorkBuddy", Description: "WorkBuddy dashboard: credits, check-in, plan, import."},
@@ -211,6 +214,10 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleKeepaliveNow(req)))
 	case req.Method == http.MethodGet && path == base+"/keepalive/status":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleKeepaliveStatus()))
+	case req.Method == http.MethodPost && path == base+"/oauth/start":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleMgmtOAuthStart(req)))
+	case req.Method == http.MethodGet && path == base+"/oauth/poll":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleMgmtOAuthPoll(req)))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
@@ -332,7 +339,8 @@ func mutatingManagementPath(path string) bool {
 		base + "/import",
 		base + "/trial",
 		base + "/select",
-		base + "/keepalive":
+		base + "/keepalive",
+		base + "/oauth/start":
 		return true
 	}
 	return false
@@ -357,3 +365,120 @@ func mgmtHTMLResponse(body []byte) pluginapi.ManagementResponse {
 var (
 	checkinLocks sync.Map // auth_index -> *sync.Mutex
 )
+
+func handleMgmtOAuthStart(req pluginapi.ManagementRequest) map[string]any {
+	var body struct {
+		Region string `json:"region"`
+	}
+	_ = json.Unmarshal(req.Body, &body)
+	region := strings.ToLower(strings.TrimSpace(body.Region))
+	if region != "cn" && region != "global" {
+		region = "cn"
+	}
+
+	base := upstreamBaseCN
+	if region == "global" {
+		base = upstreamBaseGlobal
+	}
+
+	client := newLoginClient()
+	stateUrl := base + "/v2/plugin/auth/state?platform=CLI"
+	data, _, err := doJSON(client, http.MethodPost, stateUrl, nil, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return map[string]any{"success": false, "error": "auth state request failed: " + err.Error()}
+	}
+
+	var st authStateData
+	_ = json.Unmarshal(data, &st)
+	if st.State == "" || st.AuthURL == "" {
+		return map[string]any{"success": false, "error": "missing state or authUrl from upstream"}
+	}
+
+	loginStates.Store(st.State, &loginCtx{client: client, expires: time.Now().Add(loginTTL)})
+	return map[string]any{
+		"success": true,
+		"state":   st.State,
+		"authUrl": st.AuthURL,
+	}
+}
+
+func handleMgmtOAuthPoll(req pluginapi.ManagementRequest) map[string]any {
+	state := ""
+	if vals := req.Query["state"]; len(vals) > 0 {
+		state = strings.TrimSpace(vals[0])
+	}
+	region := ""
+	if vals := req.Query["region"]; len(vals) > 0 {
+		region = strings.ToLower(strings.TrimSpace(vals[0]))
+	}
+	if state == "" {
+		return map[string]any{"success": false, "error": "state is required"}
+	}
+	if region != "cn" && region != "global" {
+		region = "cn"
+	}
+
+	v, ok := loginStates.Load(state)
+	if !ok {
+		return map[string]any{"success": false, "status": "expired", "error": "unknown state or expired"}
+	}
+	lc := v.(*loginCtx)
+	if time.Now().After(lc.expires) {
+		loginStates.Delete(state)
+		return map[string]any{"success": false, "status": "expired", "error": "login expired"}
+	}
+
+	base := upstreamBaseCN
+	if region == "global" {
+		base = upstreamBaseGlobal
+	}
+
+	tokRaw, status, errTok := doJSON(lc.client, http.MethodGet, base+"/v2/plugin/auth/token?state="+state, nil, nil)
+	if errTok != nil {
+		if status == 0 || status >= 500 {
+			loginStates.Delete(state)
+			return map[string]any{"success": false, "status": "error", "error": errTok.Error()}
+		}
+		return map[string]any{"success": true, "status": "pending", "message": "waiting for login"}
+	}
+
+	var tok tokenData
+	if err := json.Unmarshal(tokRaw, &tok); err != nil || tok.AccessToken == "" {
+		return map[string]any{"success": true, "status": "pending", "message": "waiting for login"}
+	}
+
+	var acct accountData
+	acctHeaders := func(r *http.Request) {
+		commonHeaders(r)
+		r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	}
+	if acctRaw, _, errAcct := doJSON(lc.client, http.MethodGet, base+"/v2/plugin/login/account?state="+state, acctHeaders, nil); errAcct == nil {
+		_ = json.Unmarshal(acctRaw, &acct)
+	}
+
+	domain := tok.Domain
+	if region == "global" && domain == "" {
+		domain = "workbuddy.ai"
+	}
+
+	sa := &storedAuth{
+		Auth: storedTokens{
+			AccessToken:  tok.AccessToken,
+			RefreshToken: tok.RefreshToken,
+			ExpiresAt:    time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix(),
+			Domain:       domain,
+		},
+		Account: storedAccount{
+			UID:          acct.UID,
+			EnterpriseID: acct.EnterpriseID,
+			Nickname:     acct.Nickname,
+		},
+	}
+	loginStates.Delete(state)
+
+	return map[string]any{
+		"success": true,
+		"status":  "success",
+		"auth":    sa,
+	}
+}
