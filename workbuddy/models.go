@@ -49,11 +49,30 @@ func storeDynamicModels(models []pluginapi.ModelInfo) {
 }
 
 func fetchDynamicModels() []pluginapi.ModelInfo {
+	if models, ok := cachedDynamicModels(); ok {
+		return models
+	}
 	return wbModels()
 }
 
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
-	return wbModels()
+	if models, ok := cachedDynamicModels(); ok {
+		return models
+	}
+	accessToken := ""
+	if len(storageJSON) > 0 {
+		if tok, ok := extractAccessToken(storageJSON); ok {
+			accessToken = tok
+		}
+	}
+	if accessToken == "" {
+		return wbModels()
+	}
+	if dyn, err := callModelsAPI(accessToken); err == nil && len(dyn) > 0 {
+		storeDynamicModels(dyn)
+		return dyn
+	}
+	return fetchDynamicModels()
 }
 
 // fetchDynamicModels calls the WorkBuddy API to get the latest model list.
