@@ -42,6 +42,9 @@ plugins:
   configs:
     qoderwork:
       enabled: true
+      # cn (default): qoder.com.cn OAuth/PAT + direct COSY transport
+      # global: qoder.com account through an authenticated local qodercli
+      backend: cn
 
 # 模型别名（可选）
 oauth-model-alias:
@@ -51,6 +54,37 @@ oauth-model-alias:
     - name: qmodel_latest
       alias: qoder/qwen3.7-max
 ```
+
+### China and global Qoder are different services
+
+`backend: cn` preserves the existing plugin behavior. It signs requests
+directly for `qoder.com.cn`, manages CN device/PAT tokens, and supports the
+CN-only credits and daily check-in APIs.
+
+`backend: global` does not reuse or send those CN credentials. It delegates
+authentication, token refresh, model availability validation, and signed inference to the
+official `qodercli` for `qoder.com`/`qoder.sh`. Install and authenticate it
+first:
+
+```bash
+brew install qoderai/qoder/qodercli --cask
+qodercli login
+qodercli --list-models
+```
+
+Then set:
+
+```yaml
+plugins:
+  configs:
+    qoderwork:
+      enabled: true
+      backend: global
+      cli_path: qodercli
+```
+
+The global backend intentionally does not call the China OAuth, credits, or
+check-in endpoints.
 
 ## 使用
 

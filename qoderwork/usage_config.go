@@ -18,6 +18,10 @@ var checkinHours = []int{9, 21}
 
 // plugin-level config decoded from plugin.register/reconfigure config_yaml.
 var (
+	qoderBackend  = "cn"
+	qoderCLIPath  = "qodercli"
+	qoderConfigMu sync.RWMutex
+
 	checkinAuto   = true // enabled by default
 	checkinAutoMu sync.RWMutex
 
@@ -62,6 +66,8 @@ func configure(raw []byte) {
 	nextSchedulerMode := schedulerModeOff // reset to default on reconfigure
 	nextKeepaliveAuto := true
 	nextMgmtKey := ""
+	nextBackend := "cn"
+	nextCLIPath := "qodercli"
 
 	cfgURL, cfgKey := "", ""
 	if len(raw) > 0 {
@@ -104,11 +110,36 @@ func configure(raw []byte) {
 					v = strings.Trim(v, "\"'")
 					nextKeepaliveAuto = v == "true" || v == "1" || v == "yes" || v == "on"
 				}
+				if strings.HasPrefix(line, "backend:") {
+					v := strings.ToLower(strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "backend:")), "\"'"))
+					if v == "global" {
+						nextBackend = "global"
+					}
+				}
+				if strings.HasPrefix(line, "cli_path:") {
+					v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "cli_path:")), "\"'")
+					if v != "" {
+						nextCLIPath = v
+					}
+				}
 			}
 		}
 	}
 
+	// The global backend delegates auth, refresh, and inference to qodercli.
+	// China-only background jobs must not inspect its local marker credential.
+	if nextBackend == "global" {
+		nextCheckinAuto = false
+		nextLifecycleAuto = false
+		nextKeepaliveAuto = false
+	}
+
 	// Apply each setting under its own lock — no nesting.
+	qoderConfigMu.Lock()
+	qoderBackend = nextBackend
+	qoderCLIPath = nextCLIPath
+	qoderConfigMu.Unlock()
+
 	checkinAutoMu.Lock()
 	checkinAuto = nextCheckinAuto
 	checkinAutoMu.Unlock()
@@ -136,6 +167,18 @@ func configure(raw []byte) {
 
 	resolveUsageReport(cfgURL, cfgKey)
 	ensureScheduler()
+}
+
+func globalBackendEnabled() bool {
+	qoderConfigMu.RLock()
+	defer qoderConfigMu.RUnlock()
+	return qoderBackend == "global"
+}
+
+func configuredCLIPath() string {
+	qoderConfigMu.RLock()
+	defer qoderConfigMu.RUnlock()
+	return qoderCLIPath
 }
 
 // resolveUsageReport fills usageReportURL/key from config → env → secret files.

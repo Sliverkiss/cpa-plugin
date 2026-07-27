@@ -346,6 +346,8 @@ func wbRegistration() registration {
 			GitHubRepository: "https://github.com/Sliverkiss/cpa-plugin",
 			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
+				{Name: "backend", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "global"}, Description: "Qoder service: cn keeps the direct QoderWork China transport; global uses an authenticated local qodercli (default cn)."},
+				{Name: "cli_path", Type: pluginapi.ConfigFieldTypeString, Description: "Global backend only: qodercli executable path or command name (default qodercli)."},
 				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 and 21:00 local time for CN accounts (default true)."},
 				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto disable CN when credits exhausted; re-enable CN after check-in restores credits (default true)."},
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 22:00 local time to prevent Keycloak offline-session expiry (default true)."},
@@ -599,6 +601,12 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 		// Not a qoderwork credential; let the host try other providers.
 		return okEnvelope(pluginapi.AuthParseResponse{Handled: false})
 	}
+	isGlobalAuth := strings.EqualFold(strings.TrimSpace(sa.Auth.Domain), "qoder.com")
+	if isGlobalAuth != globalBackendEnabled() {
+		// Keep credentials isolated when an installation switches backend.
+		// In particular, never route the global CLI marker into CN HTTP code.
+		return okEnvelope(pluginapi.AuthParseResponse{Handled: false})
+	}
 	// CRITICAL: echo back the host-provided FileName AND leave ID empty.
 	//
 	// CPA uses ID for auth record identity (upsert key). If we set ID=uid
@@ -656,6 +664,9 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	var req pluginapi.ExecutorRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
+	}
+	if globalBackendEnabled() {
+		return handleGlobalExecute(req)
 	}
 	sa, err := parseStored(req.StorageJSON)
 	if err != nil {
@@ -737,6 +748,9 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	var req executorStreamRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
+	}
+	if globalBackendEnabled() {
+		return handleGlobalStream(req)
 	}
 	sa, err := parseStored(req.StorageJSON)
 	if err != nil {
