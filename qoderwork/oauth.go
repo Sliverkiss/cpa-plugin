@@ -257,6 +257,9 @@ func makePKCE() (string, string) {
 // handleStartLogin implements AuthProvider.StartLogin: build the device
 // authorization URL and stash the PKCE verifier under the returned state.
 func handleStartLogin(raw []byte) ([]byte, error) {
+	if globalBackendEnabled() {
+		return handleGlobalStartLogin()
+	}
 	verifier, challenge := makePKCE()
 	nonce := uuid.NewString()
 	machineID := uuid.NewString()
@@ -361,6 +364,9 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 	if time.Now().After(lc.expires) {
 		loginStates.Delete(state)
 		return nil, fmt.Errorf("poll: login expired (10 min timeout)")
+	}
+	if globalBackendEnabled() {
+		return handleGlobalPollLogin(state)
 	}
 
 	// Legacy path: user pasted PAT into the OAuth modal callback.
@@ -533,6 +539,12 @@ func handleRefreshAuth(raw []byte) ([]byte, error) {
 	sa, err := parseStored(req.StorageJSON)
 	if err != nil {
 		return nil, fmt.Errorf("refresh: %w", err)
+	}
+	if globalBackendEnabled() {
+		// qodercli owns the real global credential and refresh lifecycle.
+		// The CPA auth record is only a local routing marker.
+		sa.Auth.ExpiresAt = time.Now().AddDate(10, 0, 0).Unix()
+		return okEnvelope(pluginapi.AuthRefreshResponse{Auth: toAuthDataForRefresh(sa)})
 	}
 
 	if strings.HasPrefix(sa.Auth.RefreshToken, "drt-") {

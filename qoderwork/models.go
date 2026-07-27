@@ -51,6 +51,9 @@ func storeDynamicModels(models []pluginapi.ModelInfo) {
 }
 
 func fetchDynamicModels() []pluginapi.ModelInfo {
+	if globalBackendEnabled() {
+		return wbModels()
+	}
 	if models, ok := cachedDynamicModels(); ok {
 		return models
 	}
@@ -86,6 +89,9 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 }
 
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
+	if globalBackendEnabled() {
+		return wbModels()
+	}
 	if models, ok := cachedDynamicModels(); ok {
 		return models
 	}
