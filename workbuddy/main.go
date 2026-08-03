@@ -60,6 +60,8 @@ import "C"
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -563,11 +565,31 @@ func backendHeaders(req *http.Request, sa *storedAuth) {
 		req.Header.Set("X-No-Department-Info", "1")
 	}
 	req.Header.Set("X-Product", "SaaS")
+	// Client-identifying headers. Tencent's billing/usage backend uses these to
+	// populate the "client" (客户端) field; without them requests show as empty.
+	req.Header.Set("X-IDE-Type", "CLI")
+	req.Header.Set("X-IDE-Name", "CLI")
+	req.Header.Set("X-IDE-Version", "2.63.2")
+	req.Header.Set("X-Agent-Intent", "craft")
+	req.Header.Set("X-Request-ID", randomHex(16))
+	req.Header.Set("X-Conversation-ID", randomHex(16))
+	req.Header.Set("X-Conversation-Request-ID", randomHex(16))
+	req.Header.Set("X-Conversation-Message-ID", randomHex(16))
 	// Override Origin/Referer for Global accounts so the upstream doesn't
 	// reject the request as cross-origin.
 	origin := originRefererFor(sa)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
+}
+
+// randomHex returns n random bytes hex-encoded. CodeBuddy conversation/request
+// IDs are 32-char hex strings; this keeps them UUID-free but stable enough.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "0" + hex.EncodeToString([]byte(time.Now().Format("20060102150405")))
+	}
+	return hex.EncodeToString(b)
 }
 
 // -----------------------------------------------------------------------------
